@@ -1,0 +1,59 @@
+{
+  "name": "ratel-financial-platform",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@nestjs/bullmq": "^11.0.4",
+    "@nestjs/common": "^11.1.28",
+    "@nestjs/config": "^4.0.4",
+    "@nestjs/core": "^11.1.28",
+    "@nestjs/jwt": "^11.0.2",
+    "@nestjs/passport": "^11.0.5",
+    "@nestjs/platform-fastify": "^11.1.28",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/auto-instrumentations-node": "^0.79.0",
+    "@opentelemetry/sdk-node": "^0.221.0",
+    "@prisma/client": "^7.9.1",
+    "argon2": "^0.45.1",
+    "bullmq": "^5.81.2",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.15.1",
+    "fastify": "^5.10.0",
+    "ioredis": "^5.11.1",
+    "nestjs-pino": "^4.6.1",
+    "passport": "^0.7.0",
+    "passport-jwt": "^4.0.1",
+    "pino": "^10.3.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "uuid": "^14.0.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.24",
+    "@nestjs/schematics": "^11.1.0",
+    "@nestjs/testing": "^11.1.28",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^26.1.2",
+    "dependency-cruiser": "^18.1.0",
+    "eslint": "^10.8.0",
+    "eslint-config-prettier": "^10.1.8",
+    "jest": "^30.4.2",
+    "pino-pretty": "^13.1.3",
+    "prettier": "^3.9.6",
+    "prisma": "^7.9.1",
+    "ts-jest": "^29.4.12",
+    "typescript": "^5.9.3"
+  }
+}

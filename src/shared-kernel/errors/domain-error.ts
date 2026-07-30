@@ -1,0 +1,43 @@
+// src/shared-kernel/errors/domain-error.ts
+/**
+ * Base for every domain/application-layer error. Carries a stable `code`
+ * (maps 1:1 to an RFC 7807 `type` URL, Phase 7.6) and a default HTTP
+ * status, so domain code never imports anything HTTP-related itself —
+ * preserves the hexagonal dependency rule from Phase 4.3.
+ */
+export abstract class DomainError extends Error {
+  abstract readonly code: string;
+  abstract readonly httpStatus: number;
+
+  constructor(message: string) {
+    super(message);
+    this.name = this.constructor.name;
+  }
+}
+
+export class PeriodClosedError extends DomainError {
+  readonly code = 'period-closed';
+  readonly httpStatus = 409;
+
+  constructor(periodId: string) {
+    super(`Financial period ${periodId} is closed. Submit an adjustment instead.`);
+  }
+}
+
+export class EntityNotFoundError extends DomainError {
+  readonly code = 'not-found';
+  readonly httpStatus = 404;
+
+  constructor(entityType: string, id: string) {
+    super(`${entityType} with id ${id} was not found`);
+  }
+}
+
+export class InvalidStateTransitionError extends DomainError {
+  readonly code = 'invalid-state-transition';
+  readonly httpStatus = 409;
+
+  constructor(entityType: string, from: string, to: string) {
+    super(`Cannot transition ${entityType} from '${from}' to '${to}'`);
+  }
+}

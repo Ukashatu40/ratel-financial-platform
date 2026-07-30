@@ -1,0 +1,81 @@
+// prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  // url      = env("DATABASE_URL")
+}
+
+// M0 only needs enough for the shared kernel (Outbox) to compile against.
+// Full domain schema (expenses, payroll, etc.) lands with M1/M2 per Phase 6.
+
+enum OutboxStatus {
+  pending
+  dispatched
+  failed
+}
+
+enum PeriodStatus {
+  open
+  closing
+  closed
+  reopened
+}
+
+model OutboxEvent {
+  id            String       @id @default(uuid())
+  aggregateType String       @map("aggregate_type")
+  aggregateId   String       @map("aggregate_id")
+  eventType     String       @map("event_type")
+  payload       Json
+  status        OutboxStatus @default(pending)
+  createdAt     DateTime     @default(now()) @map("created_at")
+  dispatchedAt  DateTime?    @map("dispatched_at")
+
+  @@index([status, createdAt])
+  @@map("outbox_events")
+}
+
+// Minimal stub — full Organization model (with settings, currency defaults,
+// etc.) lands when we do the reference-tables pass. Only what FinancialPeriod
+// needs as a FK target exists here for now.
+model Organization {
+  id        String   @id @default(uuid())
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  financialPeriods FinancialPeriod[]
+
+  @@map("organizations")
+}
+
+// Same deal — minimal stub, just enough for closedBy FK.
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  createdAt DateTime @default(now()) @map("created_at")
+
+  closedPeriods FinancialPeriod[] @relation("PeriodClosedBy")
+
+  @@map("users")
+}
+
+model FinancialPeriod {
+  id             String       @id @default(uuid())
+  organizationId String       @map("organization_id")
+  startDate      DateTime     @db.Date @map("start_date")
+  endDate        DateTime     @db.Date @map("end_date")
+  status         PeriodStatus @default(open)
+  closedById     String?      @map("closed_by")
+  closedAt       DateTime?    @map("closed_at")
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  closedBy     User?        @relation("PeriodClosedBy", fields: [closedById], references: [id])
+
+  @@unique([organizationId, startDate, endDate], name: "uq_org_period")
+  @@index([organizationId, status])
+  @@map("financial_periods")
+}
