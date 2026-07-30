@@ -5,3 +5,12 @@
 .windsurf
 .env
 docs/architecture.md
+
+# .gitignore
+node_modules/
+dist/
+coverage/
+.env
+*.log
+.DS_Store
+prisma/migrations/dev.db
