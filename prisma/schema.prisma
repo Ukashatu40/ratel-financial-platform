@@ -24,6 +24,28 @@ enum PeriodStatus {
   reopened
 }
 
+enum ExpenseStatus {
+  draft
+  pending_approval
+  approved
+  rejected
+  cancelled
+  closed
+}
+
+enum ExpenseSourceType {
+  manual
+  employee
+  accountant
+  import
+  integration
+}
+
+enum ApprovalDecision {
+  approved
+  rejected
+}
+
 model OutboxEvent {
   id            String       @id @default(uuid())
   aggregateType String       @map("aggregate_type")
@@ -74,8 +96,139 @@ model FinancialPeriod {
 
   organization Organization @relation(fields: [organizationId], references: [id])
   closedBy     User?        @relation("PeriodClosedBy", fields: [closedById], references: [id])
+  expenses Expense[]
 
   @@unique([organizationId, startDate, endDate], name: "uq_org_period")
   @@index([organizationId, status])
   @@map("financial_periods")
+}
+
+// --- Minimal reference-table stubs (full detail deferred to the
+// reference-tables pass, per the same pattern used for Organization/User
+// in Financial Period) ---
+
+model Department {
+  id             String   @id @default(uuid())
+  organizationId String   @map("organization_id")
+  name           String
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  expenses Expense[]
+
+  @@unique([organizationId, name])
+  @@map("departments")
+}
+
+model Vendor {
+  id             String   @id @default(uuid())
+  organizationId String   @map("organization_id")
+  name           String
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  expenses Expense[]
+
+  @@map("vendors")
+}
+
+model Project {
+  id             String   @id @default(uuid())
+  organizationId String   @map("organization_id")
+  name           String
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  expenses Expense[]
+
+  @@map("projects")
+}
+
+model ExpenseCategory {
+  id             String   @id @default(uuid())
+  organizationId String   @map("organization_id")
+  name           String
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  expenses Expense[]
+
+  @@unique([organizationId, name])
+  @@map("expense_categories")
+}
+
+// Atomic per-organization counter backing ExpenseRepository.nextExpenseNumber().
+// A separate table rather than a Postgres SEQUENCE because sequences are
+// global/unscoped by default — this keeps numbering scoped per organization_id,
+// which matters once multi-tenancy is real (Phase 1.3 groundwork).
+model ExpenseNumberSequence {
+  organizationId String @id @map("organization_id")
+  nextValue      Int    @default(1) @map("next_value")
+
+  @@map("expense_number_sequences")
+}
+
+model Expense {
+  id                 String            @default(uuid())
+  organizationId     String            @map("organization_id")
+  expenseNumber      String            @map("expense_number")
+  status             ExpenseStatus     @default(draft)
+  sourceType         ExpenseSourceType @map("source_type")
+  sourceActorId      String            @map("source_actor_id")
+  sourceImportJobId  String?           @map("source_import_job_id")
+  amountMinorUnits   BigInt            @map("amount_minor_units")
+  currency           String            @db.Char(3) @default("NGN")
+  categoryId         String            @map("category_id")
+  vendorId           String?           @map("vendor_id")
+  departmentId       String            @map("department_id")
+  projectId          String?           @map("project_id")
+  periodId           String            @map("period_id")
+  parentExpenseId    String?           @map("parent_expense_id")
+  adjustmentReason   String?           @map("adjustment_reason")
+  expenseDate        DateTime          @db.Date @map("expense_date")
+  description        String?
+  deletedAt          DateTime?         @map("deleted_at")
+  createdAt          DateTime          @default(now()) @map("created_at")
+  updatedAt          DateTime          @updatedAt @map("updated_at")
+
+  category Department       @relation(fields: [departmentId], references: [id])
+  vendor   Vendor?           @relation(fields: [vendorId], references: [id])
+  project  Project?          @relation(fields: [projectId], references: [id])
+  expenseCategory ExpenseCategory @relation(fields: [categoryId], references: [id])
+  period   FinancialPeriod   @relation(fields: [periodId], references: [id])
+
+  @@id([id, expenseDate]) // composite PK required by range partitioning (Phase 6.2)
+  @@unique([organizationId, expenseNumber])
+  @@index([organizationId, departmentId, status])
+  @@index([organizationId, vendorId])
+  @@index([organizationId, projectId])
+  @@index([periodId])
+  @@index([parentExpenseId])
+  @@map("expenses")
+}
+
+model ApprovalProgress {
+  id        String   @id @default(uuid())
+  itemId    String   @unique @map("item_id")
+  itemType  String   @map("item_type") // 'Expense' | 'PayrollRun' (future)
+  chain     Json     // snapshot of ApprovalChain at initialization time —
+                      // deliberately frozen, so a mid-flight approval isn't
+                      // silently affected by a policy change (e.g. threshold
+                      // edit) that happens after the item was submitted
+  createdAt DateTime @default(now()) @map("created_at")
+
+  records ApprovalRecord[]
+
+  @@map("approval_progress")
+}
+
+model ApprovalRecord {
+  id          String           @id @default(uuid())
+  progressId  String           @map("progress_id")
+  stepOrder   Int              @map("step_order")
+  approverId  String           @map("approver_id")
+  decision    ApprovalDecision
+  reason      String?
+  decidedAt   DateTime         @default(now()) @map("decided_at")
+
+  progress ApprovalProgress @relation(fields: [progressId], references: [id])
+
+  @@unique([progressId, stepOrder])
+  @@map("approval_records")
 }
