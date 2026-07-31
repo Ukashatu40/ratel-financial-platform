@@ -3,7 +3,9 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from './config/config.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { SharedKernelModule } from './shared-kernel/shared-kernel.module';
+import { WorkflowModule } from './shared-kernel/workflow/workflow.module';
 import { FinancialPeriodModule } from './contexts/financial-period/financial-period.module';
+import { ExpenseModule } from './contexts/expense/expense.module';
 import { AppController } from './app.controller';
 
 /**
@@ -20,7 +22,9 @@ import { AppController } from './app.controller';
     ConfigModule,
     PrismaModule,
     SharedKernelModule,
+    WorkflowModule,
     FinancialPeriodModule,
+    ExpenseModule,
   ],
   controllers: [AppController],
 })
