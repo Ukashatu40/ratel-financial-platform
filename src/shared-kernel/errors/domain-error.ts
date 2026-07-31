@@ -41,3 +41,12 @@ export class InvalidStateTransitionError extends DomainError {
     super(`Cannot transition ${entityType} from '${from}' to '${to}'`);
   }
 }
+
+export class NoOpenPeriodError extends DomainError {
+  readonly code = 'no-open-period';
+  readonly httpStatus = 409;
+
+  constructor(organizationId: string) {
+    super(`Organization ${organizationId} has no currently open financial period`);
+  }
+}
