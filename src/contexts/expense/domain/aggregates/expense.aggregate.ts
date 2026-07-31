@@ -5,6 +5,7 @@ import { Money } from '../../../../shared-kernel/money/money.vo';
 import { InvalidStateTransitionError } from '../../../../shared-kernel/errors/domain-error';
 import { ExpenseStatusValue, MUTABLE_STATUSES } from '../value-objects/expense-status';
 import { ExpenseSource } from '../value-objects/expense-source';
+import { DomainError } from '../../../../shared-kernel/errors/domain-error';
 import {
   expenseAdjustmentCreated,
   expenseApproved,
@@ -34,17 +35,21 @@ export interface ExpenseProps {
   updatedAt: Date;
 }
 
-export class AdjustmentReasonRequiredError extends Error {
+export class AdjustmentReasonRequiredError extends DomainError {
+  readonly code = 'adjustment-reason-required';
+  readonly httpStatus = 400;
+
   constructor() {
     super('An adjustment reason is required when creating an expense adjustment');
-    this.name = 'AdjustmentReasonRequiredError';
   }
 }
 
-export class ExpenseNotMutableError extends Error {
-  constructor(id: string, status: ExpenseStatusValue) {
+export class ExpenseNotMutableError extends DomainError {
+  readonly code = 'expense-not-mutable';
+  readonly httpStatus = 409;
+
+  constructor(id: string, status: string) {
     super(`Expense ${id} cannot be edited directly while in status '${status}'. Use createAdjustment() instead.`);
-    this.name = 'ExpenseNotMutableError';
   }
 }
 
