@@ -71,6 +71,10 @@
     "prettier": "^3.9.6",
     "prisma": "^7.9.1",
     "ts-jest": "^29.4.12",
+    "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
+  },
+  "prisma": {
+    "seed": "ts-node -r dotenv/config --compiler-options {\"module\":\"CommonJS\"} prisma/seed/seed.ts"
   }
 }
