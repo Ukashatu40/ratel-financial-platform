@@ -53,11 +53,22 @@ export class ProblemDetailsFilter implements ExceptionFilter {
     }
 
     if (exception instanceof HttpException) {
+      const response = exception.getResponse();
+      // class-validator's ValidationPipe puts per-field errors in
+      // response.message as a string[] — surface them instead of the
+      // generic "Bad Request Exception" wrapper message.
+      const detail =
+        typeof response === 'object' && response !== null && 'message' in response
+          ? Array.isArray((response as any).message)
+            ? (response as any).message.join('; ')
+            : String((response as any).message)
+          : exception.message;
+
       return {
         type: `${ProblemDetailsFilter.BASE_URL}/http-error`,
         title: exception.name,
         status: exception.getStatus(),
-        detail: exception.message,
+        detail,
         instance,
         correlationId,
       };
