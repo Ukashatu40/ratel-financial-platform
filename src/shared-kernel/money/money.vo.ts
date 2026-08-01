@@ -1,6 +1,11 @@
 // src/shared-kernel/money/money.vo.ts
 import { CurrencyCode, isSupportedCurrency } from './currency-code';
 
+export interface MoneyJSON {
+  minorUnits: string; // bigint as string — JSON has no native bigint
+  currency: CurrencyCode;
+}
+
 /**
  * Money value object. Amount is ALWAYS stored in minor units (kobo, cents)
  * as a bigint — never a float. This is a direct, deliberate reuse of the
@@ -18,9 +23,10 @@ export class Money {
     if (!isSupportedCurrency(currency)) {
       throw new InvalidCurrencyError(currency);
     }
-    const amount = typeof amountMinorUnits === 'number'
-      ? BigInt(Math.trunc(amountMinorUnits))
-      : amountMinorUnits;
+    const amount =
+      typeof amountMinorUnits === 'number'
+        ? BigInt(Math.trunc(amountMinorUnits))
+        : amountMinorUnits;
 
     return new Money(amount, currency);
   }
@@ -63,6 +69,14 @@ export class Money {
     if (this.currency !== other.currency) {
       throw new CurrencyMismatchError(this.currency, other.currency);
     }
+  }
+
+  toJSON(): MoneyJSON {
+    return { minorUnits: this.amountMinorUnits.toString(), currency: this.currency };
+  }
+
+  static fromJSON(json: MoneyJSON): Money {
+    return Money.of(BigInt(json.minorUnits), json.currency);
   }
 }
 
