@@ -11,6 +11,8 @@ datasource db {
 // M0 only needs enough for the shared kernel (Outbox) to compile against.
 // Full domain schema (expenses, payroll, etc.) lands with M1/M2 per Phase 6.
 
+// ENUMS
+
 enum OutboxStatus {
   pending
   dispatched
@@ -46,6 +48,16 @@ enum ApprovalDecision {
   rejected
 }
 
+enum PayrollRunStatus {
+  draft
+  pending_approval
+  approved
+  processing
+  completed
+  cancelled
+}
+
+// MODELS
 model OutboxEvent {
   id            String       @id @default(uuid())
   aggregateType String       @map("aggregate_type")
@@ -97,6 +109,7 @@ model FinancialPeriod {
   organization Organization @relation(fields: [organizationId], references: [id])
   closedBy     User?        @relation("PeriodClosedBy", fields: [closedById], references: [id])
   expenses Expense[]
+  payrollRuns PayrollRun[]
 
   @@unique([organizationId, startDate, endDate], name: "uq_org_period")
   @@index([organizationId, status])
@@ -231,4 +244,80 @@ model ApprovalRecord {
 
   @@unique([progressId, stepOrder])
   @@map("approval_records")
+}
+
+model Employee {
+  id             String   @id @default(uuid())
+  organizationId String   @map("organization_id")
+  fullName       String   @map("full_name")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  salaryStructures SalaryStructure[]
+  payslips         Payslip[]
+
+  @@map("employees")
+}
+
+model SalaryStructure {
+  id             String    @id @default(uuid())
+  organizationId String    @map("organization_id")
+  employeeId     String    @map("employee_id")
+  version        Int
+  effectiveFrom  DateTime  @db.Date @map("effective_from")
+  effectiveTo    DateTime? @db.Date @map("effective_to") // null = currently active
+
+  // baseSalaryLineItems, field-level encrypted (Phase 9.3 / piece 3.5) —
+  // this is raw compensation data, so it never lands in a plaintext column,
+  // unlike the reference tables above.
+  encryptedLineItems Bytes @map("encrypted_line_items")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  @@unique([employeeId, version])
+  @@index([employeeId, effectiveTo]) // effectiveTo IS NULL lookups (active structure) hit this
+  @@map("salary_structures")
+}
+
+model PayrollRun {
+  id             String           @id @default(uuid())
+  organizationId String           @map("organization_id")
+  periodId       String           @map("period_id")
+  status         PayrollRunStatus @default(draft)
+  runMonth       DateTime         @db.Date @map("run_month")
+  createdById    String           @map("created_by")
+  approvedById   String?          @map("approved_by")
+  approvedAt     DateTime?        @map("approved_at")
+  createdAt      DateTime         @default(now()) @map("created_at")
+
+  period   FinancialPeriod @relation(fields: [periodId], references: [id])
+  payslips Payslip[]
+
+  @@unique([organizationId, runMonth])
+  @@index([organizationId, status])
+  @@map("payroll_runs")
+}
+
+model Payslip {
+  id               String   @id @default(uuid())
+  payrollRunId     String   @map("payroll_run_id")
+  employeeId       String   @map("employee_id")
+  grossPayMinorUnits BigInt @map("gross_pay_minor_units")
+  netPayMinorUnits   BigInt @map("net_pay_minor_units")
+  currency         String   @db.Char(3) @default("NGN")
+
+  // Combined { salaryStructureSnapshot, lineItems, taxComputation } as one
+  // encrypted JSON blob (Phase 9.3) — gross/net stay plaintext above
+  // specifically so reporting/reconciliation can aggregate without
+  // decrypting every row, per the original Phase 6.2 schema rationale.
+  encryptedDetail  Bytes    @map("encrypted_detail")
+
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  payrollRun PayrollRun @relation(fields: [payrollRunId], references: [id])
+  employee   Employee   @relation(fields: [employeeId], references: [id])
+
+  @@unique([payrollRunId, employeeId])
+  @@map("payslips")
 }
