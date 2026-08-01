@@ -4,8 +4,10 @@ import { ConfigModule } from './config/config.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { SharedKernelModule } from './shared-kernel/shared-kernel.module';
 import { WorkflowModule } from './shared-kernel/workflow/workflow.module';
+import { EncryptionModule } from './shared-kernel/encryption/encryption.module';
 import { FinancialPeriodModule } from './contexts/financial-period/financial-period.module';
 import { ExpenseModule } from './contexts/expense/expense.module';
+import { PayrollModule } from './contexts/payroll/payroll.module';
 import { AppController } from './app.controller';
 
 /**
@@ -23,8 +25,10 @@ import { AppController } from './app.controller';
     PrismaModule,
     SharedKernelModule,
     WorkflowModule,
+    EncryptionModule,
     FinancialPeriodModule,
     ExpenseModule,
+    PayrollModule,
   ],
   controllers: [AppController],
 })
