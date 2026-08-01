@@ -64,6 +64,7 @@
     "@types/node": "^26.1.2",
     "@types/pg": "^8.20.0",
     "dependency-cruiser": "^18.1.0",
+    "dotenv": "^17.4.2",
     "eslint": "^10.8.0",
     "eslint-config-prettier": "^10.1.8",
     "jest": "^30.4.2",
