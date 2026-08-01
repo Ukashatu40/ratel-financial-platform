@@ -64,7 +64,7 @@ export class CreateAdjustmentHandler implements CommandHandler<CreateAdjustmentC
           expenseToApprovable(adjustment),
           this.approvalPolicy,
         );
-        await this.progressRepo.initialize(adjustment.id, chain, tx);
+        await this.progressRepo.initialize(adjustment.id, 'Expense', chain, tx);
       }
 
       await this.outbox.enqueue(adjustment.pullDomainEvents(), tx);

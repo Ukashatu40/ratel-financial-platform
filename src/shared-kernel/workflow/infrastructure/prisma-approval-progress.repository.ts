@@ -17,11 +17,11 @@ import { ApprovalProgressRepository } from '../approval-progress-repository.port
 export class PrismaApprovalProgressRepository implements ApprovalProgressRepository {
   constructor(private readonly prisma: PrismaService) {}
 
-  async initialize(itemId: string, chain: ApprovalChain, tx: TransactionClient): Promise<ApprovalProgress> {
+  async initialize(itemId: string, itemType: string, chain: ApprovalChain, tx: TransactionClient): Promise<ApprovalProgress> {
     await tx.approvalProgress.create({
       data: {
         itemId,
-        itemType: 'Expense', // generalize to a param once Payroll needs this too
+        itemType,
         chain: chain.toArray() as any,
       },
     });

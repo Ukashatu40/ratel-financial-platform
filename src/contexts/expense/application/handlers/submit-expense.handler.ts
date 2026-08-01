@@ -46,7 +46,7 @@ export class SubmitExpenseHandler implements CommandHandler<SubmitExpenseCommand
         // than leaving it stuck in 'pending_approval' with no one to act on it.
         expense.approve('system-auto-approval');
       } else {
-        await this.progressRepo.initialize(expense.id, chain, tx);
+        await this.progressRepo.initialize(expense.id, 'Expense', chain, tx);
       }
 
       await this.repo.save(expense, tx);

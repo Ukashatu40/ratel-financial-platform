@@ -4,7 +4,7 @@ import { ApprovalChain } from './approval-chain';
 import { ApprovalProgress } from './approval-progress';
 
 export interface ApprovalProgressRepository {
-  initialize(itemId: string, chain: ApprovalChain, tx: TransactionClient): Promise<ApprovalProgress>;
+  initialize(itemId: string, itemType: string,  chain: ApprovalChain, tx: TransactionClient): Promise<ApprovalProgress>;
   findByItemId(itemId: string, tx?: TransactionClient): Promise<ApprovalProgress | null>;
   save(itemId: string, progress: ApprovalProgress, tx: TransactionClient): Promise<void>;
 }
