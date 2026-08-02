@@ -11,6 +11,7 @@ import { seedProjects } from './fixtures/projects';
 import { seedExpenseCategories } from './fixtures/expense-categories';
 import { seedEmployees } from './fixtures/employees';
 import { seedSalaryStructures } from './fixtures/salary-structures';
+import { seedRolePermissions } from './fixtures/role-permissions';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 
@@ -35,9 +36,10 @@ async function main() {
   const kek = loadKekFromBase64(masterKeyRaw);
 
   const { org } = await seedOrganizations(prisma);
-  const users = await seedUsers(prisma);
   await seedFinancialPeriods(prisma, org.id);
-  await seedDepartments(prisma, org.id);
+  const { department } = await seedDepartments(prisma, org.id);
+  const users = await seedUsers(prisma, org.id, department.id);
+  await seedRolePermissions(prisma);
   await seedVendors(prisma, org.id);
   await seedProjects(prisma, org.id);
   await seedExpenseCategories(prisma, org.id);

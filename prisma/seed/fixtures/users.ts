@@ -1,5 +1,6 @@
 // prisma/seed/fixtures/users.ts
 import { PrismaClient } from '@prisma/client';
+import { hash } from 'argon2';
 
 // Fixed IDs so other fixtures/tests can reference them by constant rather
 // than re-querying — deliberate for dev/seed data only, never a pattern
@@ -8,17 +9,67 @@ export const SEED_USERS = {
   employee: { id: '00000000-0000-4000-8000-000000000011', email: 'employee@ratel-plus.com' },
   accountant: { id: '00000000-0000-4000-8000-000000000012', email: 'accountant@ratel-plus.com' },
   departmentHead: { id: '00000000-0000-4000-8000-000000000013', email: 'depthead@ratel-plus.com' },
-  financeDirector: { id: '00000000-0000-4000-8000-000000000014', email: 'financedirector@ratel-plus.com' },
+  financeDirector: {
+    id: '00000000-0000-4000-8000-000000000014',
+    email: 'financedirector@ratel-plus.com',
+  },
+  payrollAdmin: {
+    id: '00000000-0000-4000-8000-000000000015',
+    email: 'payrolladmin@ratel-plus.com',
+  },
 } as const;
 
-export async function seedUsers(prisma: PrismaClient) {
+// Dev-only fixed password for every seeded user — never used outside local
+// seeding, and printed to the seed log so it's easy to find, not hidden.
+const DEV_PASSWORD = 'DevPassword!23';
+
+export async function seedUsers(
+  prisma: PrismaClient,
+  organizationId: string,
+  departmentId: string,
+) {
+  const passwordHash = await hash(DEV_PASSWORD);
+
   for (const user of Object.values(SEED_USERS)) {
     await prisma.user.upsert({
       where: { id: user.id },
-      create: { id: user.id, email: user.email },
+      create: { id: user.id, email: user.email, passwordHash },
       update: { email: user.email },
     });
   }
-  console.log(`  ✓ Users: ${Object.keys(SEED_USERS).length} seeded`);
+
+  const assignments: Array<{ userId: string; role: string; departmentId: string | null }> = [
+    { userId: SEED_USERS.employee.id, role: 'employee', departmentId: null },
+    { userId: SEED_USERS.accountant.id, role: 'accountant', departmentId: null },
+    { userId: SEED_USERS.departmentHead.id, role: 'department_head', departmentId },
+    { userId: SEED_USERS.financeDirector.id, role: 'finance_director', departmentId: null },
+    { userId: SEED_USERS.payrollAdmin.id, role: 'payroll_admin', departmentId: null },
+  ];
+
+  for (const a of assignments) {
+    // Manual find-then-create instead of upsert(), specifically because
+    // @@unique([userId, role, departmentId]) doesn't reliably identify a
+    // row when departmentId is null — Postgres treats every NULL as
+    // distinct in a unique index, so the compound key can't be trusted to
+    // find an existing null-department row. This also sidesteps the
+    // TS2322 error entirely, since we're not constructing a
+    // userId_role_departmentId compound WHERE object at all.
+    const existing = await prisma.userRoleAssignment.findFirst({
+      where: { userId: a.userId, role: a.role as any, departmentId: a.departmentId },
+    });
+
+    if (!existing) {
+      await prisma.userRoleAssignment.create({
+        data: {
+          userId: a.userId,
+          organizationId,
+          role: a.role as any,
+          departmentId: a.departmentId,
+        },
+      });
+    }
+  }
+
+  console.log(`  ✓ Users: ${Object.keys(SEED_USERS).length} seeded (password: ${DEV_PASSWORD})`);
   return SEED_USERS;
 }
