@@ -1,18 +1,16 @@
-// src/shared-kernel/outbox/outbox.service.ts
+// src/shared-kernel/outbox/outbox.service.ts  (replace enqueue())
 import { Injectable } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { DomainEvent } from '../events/domain-event';
 import { TransactionClient } from '../unit-of-work/unit-of-work.port';
+import { RequestContext } from '../context/request-context';
 
-/**
- * Writes events to the outbox table WITHIN the same transaction as the
- * aggregate's state mutation (Phase 5.2) — this is what guarantees a
- * state change and its event are never recorded independently of one
- * another, even across a process crash.
- */
 @Injectable()
 export class OutboxService {
   async enqueue(events: DomainEvent[], tx: TransactionClient): Promise<void> {
     if (events.length === 0) return;
+
+    const ctx = RequestContext.current();
 
     await tx.outboxEvent.createMany({
       data: events.map((event) => ({
@@ -20,6 +18,11 @@ export class OutboxService {
         aggregateId: event.aggregateId,
         eventType: event.type,
         payload: event.payload as any,
+        correlationId: ctx?.correlationId ?? randomUUID(), // fallback for non-HTTP callers (seed, future jobs)
+        requestId: ctx?.requestId,
+        ipAddress: ctx?.ipAddress,
+        userAgent: ctx?.userAgent,
+        source: ctx?.source ?? 'background_worker',
       })),
     });
   }
