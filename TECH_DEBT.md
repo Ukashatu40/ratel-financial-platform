@@ -1,0 +1,172 @@
+# Technical Debt & Known Simplifications
+
+This document tracks deliberate simplifications, deferred work, and known gaps
+introduced during the build of `ratel-financial-platform`. Each entry was
+flagged explicitly at the point it was introduced rather than silently shipped
+— this file exists so none of them get forgotten once they're no longer fresh
+in conversation.
+
+Entries are grouped by area, each with: what the gap is, why it was
+acceptable at the time, and what closing it properly would require.
+
+---
+
+## Security / Authentication / Authorization
+
+### 1. Every actor ID is a hardcoded placeholder
+**Where:** `FinancialPeriodController`, `ExpenseController`, `PayrollRunController`
+**What:** Every endpoint that should read `@CurrentUser().id` instead uses a
+literal string (`'PLACEHOLDER_USER_ID'`, `'PLACEHOLDER_APPROVER_ID'`,
+`'PLACEHOLDER_PAYROLL_ADMIN_ID'`, `'PLACEHOLDER_FINANCE_DIRECTOR_ID'`).
+**Why acceptable so far:** No auth module exists yet; these were left as
+obvious, greppable placeholders specifically so they can't be mistaken for
+working authorization.
+**To close:** Build the auth module (JWT strategy, `@CurrentUser()` decorator),
+then replace every placeholder in one pass across all three controllers.
+
+### 2. `@RequirePermission` guard is commented out everywhere
+**Where:** Every controller method across all three contexts.
+**What:** The RBAC/permission-matrix design (Phase 9.1) was specified but
+never wired — every endpoint is currently open with no authorization
+enforcement at all.
+**To close:** Build `PermissionGuard` + `@RequirePermission` decorator (Phase
+9.7), backed by a `role_permissions` table, then uncomment every guard
+annotation already left in place as markers.
+
+### 3. `WorkflowEngine` only enforces self-approval, not role-correctness
+**Where:** `src/shared-kernel/workflow/workflow-engine.ts`
+**What:** `recordApproval()` checks that `approverId !== requesterId`
+(separation of duties) but does NOT verify the approver actually holds the
+role required by the current `ApprovalStep` (e.g. that a `finance_director`
+step is really being approved by someone with that role). Currently trusts
+whatever the controller's (currently absent) permission guard would have
+enforced.
+**To close:** Needs a `UserRoleService` port, injected into `WorkflowEngine`,
+checked in `recordApproval()` before delegating to `ApprovalProgress`.
+
+### 4. `audit_log_entries` append-only DB grant not applied
+**Where:** Migration for `add_outbox_context_and_audit_log`, commented out.
+**What:** Phase 6.2 specified `REVOKE UPDATE, DELETE ON audit_log_entries
+FROM application_role` so even a compromised app can't rewrite history. No
+`application_role` exists in the local dev DB (connecting as `postgres`
+superuser), so this was left commented rather than failing the migration.
+**To close:** Create a real least-privilege DB role as part of Phase 10
+(Infrastructure/deployment), grant it only what the app needs, apply this
+REVOKE for real.
+
+### 5. Field encryption master key sourced from plain env var
+**Where:** `AesGcmEnvelopeEncryptionService`, `FIELD_ENCRYPTION_MASTER_KEY`.
+**What:** The KEK is read directly from an environment variable — fine for
+local dev, but Phase 9.4 specified real KMS/Vault-backed key management for
+production, with rotation support.
+**To close:** Swap `loadKekFromBase64(config.get(...))` for a real KMS client
+call. The pure-function crypto core (`aes-gcm-envelope-crypto.ts`) was
+deliberately built KEK-source-agnostic, so this should be a contained change.
+
+---
+
+## Audit Trail
+
+### 6. Hash chain read-then-write is not atomic
+**Where:** `AuditLogService.record()`
+**What:** Reads the last entry's hash, then inserts a new row, as two
+separate statements. Under concurrent writers, two entries could read the
+same `prevHash` and race, corrupting the chain's integrity.
+**Why acceptable so far:** The outbox dispatcher currently runs as a single
+instance processing events sequentially (one at a time, in a loop) — no
+concurrent writers exist yet.
+**To close:** Either wrap the read+insert in a Postgres advisory lock, or
+move hash computation into a DB trigger (as Phase 6.2 originally specified).
+Must be fixed before running more than one dispatcher instance.
+
+### 7. No field-level old/new value diffing
+**Where:** `AuditSubscriber`
+**What:** Captures each domain event's full payload as `newValue`; does not
+compute or store a genuine before/after diff of specific fields on direct
+edits. This is event-sourced-style audit (full history reconstructible from
+events), which satisfies "never lose history," but is not the same guarantee
+as literal per-field old/new values implied by the original schema design.
+**To close:** Would require every mutating aggregate method to capture and
+pass forward an explicit diff — a materially larger change touching every
+aggregate, not just the audit subscriber.
+
+### 8. Failed event delivery to one subscriber is only logged, not retried
+**Where:** `DomainEventDispatcher.dispatch()`
+**What:** Uses `Promise.allSettled` across handlers so one failing subscriber
+doesn't block others — but a failed subscriber's failure is only logged, not
+retried or sent to a dead-letter queue. If Audit's DB write fails
+transiently, that audit entry is silently lost.
+**To close:** Apply the same DLQ pattern already designed for the Integration
+Layer (Phase 8.3) to per-subscriber dispatch failures.
+
+---
+
+## Domain / Business Logic
+
+### 9. `createAdjustment` re-approval threshold is a guess, not confirmed policy
+**Where:** `ExpenseAdjustmentApprovalPolicy`
+**What:** ₦1,000,000 threshold for requiring re-approval on an adjustment was
+chosen as "higher than the finance-director threshold" reasoning, not a
+number Ratel-Plus actually specified.
+**To close:** Confirm the real policy and adjust the constant.
+
+### 10. `PayrollRun.reject()` returns to `draft`, not a terminal `rejected` state
+**Where:** `PayrollRun` aggregate.
+**What:** Deliberate design choice (confirmed with you) — differs from
+Expense's terminal `rejected` status. Documented here only so the asymmetry
+between the two contexts isn't mistaken for an inconsistency bug later.
+
+### 11. `ExpenseController.adjust()` throws — organizationId resolution unresolved
+**Where:** `ExpenseController`, the `POST /:id/adjustments` endpoint.
+**What:** Deliberately left throwing rather than accepting `organizationId`
+from the request body (a security gap — should come from the authenticated
+user's own org membership, not client-supplied input).
+**To close:** Wire once `@CurrentUser()` exists (same blocker as #1).
+
+### 12. `ProcessPayrollRunHandler` does not perform real disbursement
+**Where:** `ProcessPayrollRunHandler`
+**What:** Flips `PayrollRun` state (`approved → processing → completed`)
+synchronously with no actual bank transfer / payment gateway integration.
+**To close:** Build as a real BullMQ job once a disbursement provider is
+chosen, per the original blueprint's `jobs/processors/` design.
+
+---
+
+## Performance
+
+### 13. `expenses` table is not actually partitioned
+**Where:** Prisma migration for the Expense context.
+**What:** Phase 6.2 specified range partitioning by `expense_date` for scale.
+The composite PK `(id, expenseDate)` was added in anticipation, but the
+actual `PARTITION BY RANGE` DDL was deliberately deferred — Prisma's
+migration diffing doesn't understand native partitioning and would fight it
+on every subsequent `migrate dev`.
+**To close:** Hand-written migration, done once volume actually justifies it
+(Phase 6.2's original reasoning still applies).
+
+### 14. Payroll run reads decrypt every payslip individually
+**Where:** `PrismaPayrollRunRepository.findById` / `findByOrgAndMonth`
+**What:** N decryption calls per read (one per payslip in the run) — fine at
+current volume, will matter once runs have hundreds of employees.
+**To close:** Revisit under Phase 12 (Performance) once real load exists.
+
+---
+
+## Dependency Management
+
+### 15. TypeScript pinned to 5.9.3, not latest (7.0.2 at time of writing)
+**Where:** `package.json` devDependencies.
+**Why:** TS7 is a very recent major version jump; NestJS 11's decorator
+metadata pipeline and `ts-jest` compatibility weren't confirmed. Revisit in
+isolation once the ecosystem catches up.
+
+### 16. `bullmq` pinned to 5.81.3, `ioredis` pinned to 5.11.1
+**Where:** `package.json` dependencies.
+**Why:** `bullmq@6.x` and `ioredis@6.x` were published within days of this
+build and are NOT within `@nestjs/bullmq@11.0.4`'s declared peer range
+(`bullmq: ^3.0.0 || ^4.0.0 || ^5.0.0`). Revisit both majors together once
+`@nestjs/bullmq` publishes support.
+
+---
+
+*Last updated: 2026-08-02, after the Audit subscriber piece (M3 follow-on).*
