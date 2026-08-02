@@ -48,3 +48,12 @@ CREATE INDEX "audit_log_entries_entity_type_entity_id_idx" ON "audit_log_entries
 
 -- CreateIndex
 CREATE INDEX "audit_log_entries_correlation_id_idx" ON "audit_log_entries"("correlation_id");
+
+-- NOTE: this REVOKE targets a DB role named "application_role", which
+-- doesn't exist in this local dev setup yet (we're connecting as the
+-- default `postgres` superuser). This statement is written now so it's not
+-- forgotten, but it will need the actual application DB role created first
+-- — a Phase 10 (Infrastructure) concern, not something to fake locally.
+-- Flagging as a real, tracked gap rather than silently omitting it.
+-- ALTER TABLE "audit_log_entries" ...
+-- REVOKE UPDATE, DELETE ON "audit_log_entries" FROM application_role;

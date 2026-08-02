@@ -57,6 +57,21 @@ enum PayrollRunStatus {
   cancelled
 }
 
+enum RoleName {
+  employee
+  accountant
+  department_head
+  finance_director
+  payroll_admin
+  auditor
+}
+
+enum PermissionScope {
+  own
+  department
+  organization
+}
+
 // MODELS
 model OutboxEvent {
   id            String       @id @default(uuid())
@@ -96,15 +111,64 @@ model Organization {
   @@map("organizations")
 }
 
-// Same deal — minimal stub, just enough for closedBy FK.
+// Extend the existing User stub with auth fields
 model User {
-  id        String   @id @default(uuid())
-  email     String   @unique
-  createdAt DateTime @default(now()) @map("created_at")
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
 
-  closedPeriods FinancialPeriod[] @relation("PeriodClosedBy")
+  closedPeriods    FinancialPeriod[] @relation("PeriodClosedBy")
+  roleAssignments  UserRoleAssignment[]
+  refreshTokens    RefreshToken[]
 
   @@map("users")
+}
+
+// A user can hold multiple roles (e.g. an Accountant who is ALSO a
+// department head for their own team). departmentId is only meaningful for
+// department-scoped roles (department_head) — null for org-scoped roles.
+model UserRoleAssignment {
+  id             String   @id @default(uuid())
+  userId         String   @map("user_id")
+  organizationId String   @map("organization_id")
+  role           RoleName
+  departmentId   String?  @map("department_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([userId, role, departmentId])
+  @@index([userId])
+  @@map("user_role_assignments")
+}
+
+// Phase 9.1's permission matrix, made literal data rather than a code
+// switch — editing a role's permissions is a data change, not a deploy.
+model RolePermission {
+  id         String          @id @default(uuid())
+  role       RoleName
+  permission String          // e.g. 'expense:approve'
+  scope      PermissionScope
+
+  @@unique([role, permission])
+  @@map("role_permissions")
+}
+
+model RefreshToken {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  // Hashed, never plaintext — a leaked DB dump shouldn't hand out live
+  // sessions (Phase 9.2).
+  tokenHash   String   @unique @map("token_hash")
+  expiresAt   DateTime @map("expires_at")
+  revokedAt   DateTime? @map("revoked_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("refresh_tokens")
 }
 
 model FinancialPeriod {
