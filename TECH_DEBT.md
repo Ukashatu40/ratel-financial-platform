@@ -132,6 +132,30 @@ chosen, per the original blueprint's `jobs/processors/` design.
 
 ---
 
+## Data Integrity
+
+### 17. `UserRoleAssignment`'s compound unique doesn't fully hold with nullable `departmentId`
+**Where:** `@@unique([userId, role, departmentId])` on `UserRoleAssignment`.
+**What:** Postgres treats every `NULL` as distinct within a unique index, so
+this constraint does NOT prevent two rows with the same `(userId, role,
+null)` — i.e. duplicate org-scoped role assignments (any role other than
+`department_head`) could be inserted without violating the DB constraint.
+Discovered via a TS2322 error in the seed script when trying to build a
+compound-unique `where` clause including `null` — Prisma's generated typing
+surfaced the underlying semantic gap.
+**Why acceptable so far:** Seed script now works around it with a manual
+`findFirst`-then-`create` check instead of relying on the constraint;
+duplicate assignments are merely redundant today; no real user-facing
+mutation path creates `UserRoleAssignment` rows yet (only the seed script
+does).
+**To close:** Either (a) use a non-null sentinel value for org-scoped roles'
+`departmentId` instead of `null` — e.g. reference the organization's own ID
+as a placeholder — or (b) split into two tables (`DepartmentRoleAssignment`
+vs `OrganizationRoleAssignment`) so the unique constraint doesn't need a
+nullable column at all. Must be fixed before any endpoint allows users to
+self-assign or admins to assign roles through the API — right now it's a
+seed-only quirk with no production exposure.
+
 ## Performance
 
 ### 13. `expenses` table is not actually partitioned
