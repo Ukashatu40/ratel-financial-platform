@@ -65,8 +65,19 @@ model OutboxEvent {
   eventType     String       @map("event_type")
   payload       Json
   status        OutboxStatus @default(pending)
-  createdAt     DateTime     @default(now()) @map("created_at")
-  dispatchedAt  DateTime?    @map("dispatched_at")
+
+  // Request-context metadata, captured once at enqueue time (never on the
+  // DomainEvent itself — keeps the domain layer free of HTTP concerns per
+  // Phase 4.3). OutboxDispatchService reads these back out when building
+  // the audit entry, below.
+  correlationId String       @map("correlation_id")
+  requestId     String?      @map("request_id")
+  ipAddress     String?      @map("ip_address")
+  userAgent     String?      @map("user_agent")
+  source        String       @default("background_worker")
+
+  createdAt    DateTime      @default(now()) @map("created_at")
+  dispatchedAt DateTime?     @map("dispatched_at")
 
   @@index([status, createdAt])
   @@map("outbox_events")
@@ -320,4 +331,28 @@ model Payslip {
 
   @@unique([payrollRunId, employeeId])
   @@map("payslips")
+}
+
+model AuditLogEntry {
+  id             String   @id @default(uuid())
+  organizationId String   @map("organization_id")
+  entityType     String   @map("entity_type")
+  entityId       String   @map("entity_id")
+  action         String
+  actorUserId    String?  @map("actor_user_id")
+  oldValue       Json?    @map("old_value")
+  newValue       Json?    @map("new_value")
+  reason         String?
+  correlationId  String   @map("correlation_id")
+  requestId      String?  @map("request_id")
+  ipAddress      String?  @map("ip_address")
+  userAgent      String?  @map("user_agent")
+  source         String
+  prevHash       String   @map("prev_hash")
+  entryHash      String   @map("entry_hash")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([entityType, entityId])
+  @@index([correlationId])
+  @@map("audit_log_entries")
 }
