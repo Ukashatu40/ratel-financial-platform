@@ -13,36 +13,46 @@ acceptable at the time, and what closing it properly would require.
 
 ## Security / Authentication / Authorization
 
-### 1. Every actor ID is a hardcoded placeholder
-**Where:** `FinancialPeriodController`, `ExpenseController`, `PayrollRunController`
-**What:** Every endpoint that should read `@CurrentUser().id` instead uses a
-literal string (`'PLACEHOLDER_USER_ID'`, `'PLACEHOLDER_APPROVER_ID'`,
-`'PLACEHOLDER_PAYROLL_ADMIN_ID'`, `'PLACEHOLDER_FINANCE_DIRECTOR_ID'`).
-**Why acceptable so far:** No auth module exists yet; these were left as
-obvious, greppable placeholders specifically so they can't be mistaken for
-working authorization.
-**To close:** Build the auth module (JWT strategy, `@CurrentUser()` decorator),
-then replace every placeholder in one pass across all three controllers.
+### 1. ~~Every actor ID is a hardcoded placeholder~~ — RESOLVED
+Auth module built (JWT, `@CurrentUser()`); every `PLACEHOLDER_*_ID` across
+`FinancialPeriodController`, `ExpenseController`, `PayrollRunController`
+replaced with `@CurrentUser()`. `organizationId` also removed from every
+request DTO and now derives exclusively from the authenticated principal,
+closing the cross-org spoofing surface at the source rather than detecting
+it after the fact.
 
-### 2. `@RequirePermission` guard is commented out everywhere
-**Where:** Every controller method across all three contexts.
-**What:** The RBAC/permission-matrix design (Phase 9.1) was specified but
-never wired — every endpoint is currently open with no authorization
-enforcement at all.
-**To close:** Build `PermissionGuard` + `@RequirePermission` decorator (Phase
-9.7), backed by a `role_permissions` table, then uncomment every guard
-annotation already left in place as markers.
+### 2. ~~`@RequirePermission` guard is commented out everywhere~~ — RESOLVED
+`PermissionGuard` + `@RequirePermission` built and wired on every mutating
+endpoint across all three controllers, backed by the real `role_permissions`
+table and seed data. See #3 below for what this guard does NOT yet enforce.
 
-### 3. `WorkflowEngine` only enforces self-approval, not role-correctness
-**Where:** `src/shared-kernel/workflow/workflow-engine.ts`
-**What:** `recordApproval()` checks that `approverId !== requesterId`
-(separation of duties) but does NOT verify the approver actually holds the
-role required by the current `ApprovalStep` (e.g. that a `finance_director`
-step is really being approved by someone with that role). Currently trusts
-whatever the controller's (currently absent) permission guard would have
-enforced.
-**To close:** Needs a `UserRoleService` port, injected into `WorkflowEngine`,
-checked in `recordApproval()` before delegating to `ApprovalProgress`.
+### 3. `PermissionGuard` and `WorkflowEngine` don't verify resource-level scope
+**Where:** `src/auth/authorization/permission.guard.ts`,
+`src/shared-kernel/workflow/workflow-engine.ts`
+**What:** Two related, still-open gaps:
+- `PermissionGuard` checks that a user holds SOME role granting the required
+  permission, and that the request's implicit org matches the user's own —
+  but does NOT verify department-level match (e.g. a `department_head` can
+  currently approve expenses from ANY department, not just their own,
+  despite routes being annotated `{ scope: 'department' }`). That scope
+  argument currently documents intent without being enforced.
+- `WorkflowEngine.recordApproval()` checks self-approval (separation of
+  duties) but does NOT verify the approver's role actually matches the
+  current `ApprovalStep.requiredRole` — e.g. an `employee` role, if it
+  somehow ended up calling `expense:approve` successfully, would still pass
+  `WorkflowEngine`'s own check.
+**Why acceptable so far:** No endpoint currently allows a user to act
+outside their assigned department in a way that's been tested; the gap is
+real but narrower in practice than it sounds, since seed data assigns each
+test user exactly one relevant role.
+**To close:** `PermissionGuard` needs each route to supply a resource-loader
+(fetch the target expense/payroll run, compare its `departmentId`/org
+against the user's assignment) before allowing the request through.
+`WorkflowEngine` needs a `UserRoleService` port to check the approver's role
+against `ApprovalStep.requiredRole` directly. Both are real, scoped pieces
+of work — not a rewrite — deferred here to keep the auth module's initial
+build focused on getting the mechanics (JWT, permission matrix, guard
+skeleton) correct first.
 
 ### 4. `audit_log_entries` append-only DB grant not applied
 **Where:** Migration for `add_outbox_context_and_audit_log`, commented out.
