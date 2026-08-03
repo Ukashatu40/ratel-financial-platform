@@ -12,7 +12,14 @@ export const envSchema = z.object({
 
   JWT_ACCESS_SECRET: z.string().min(32, 'JWT_ACCESS_SECRET must be at least 32 chars'),
   JWT_REFRESH_SECRET: z.string().min(32, 'JWT_REFRESH_SECRET must be at least 32 chars'),
-  JWT_ACCESS_TTL: z.string().default('15m'),
+  JWT_ACCESS_TTL: z
+    .string()
+    .regex(
+      /^\d+(\s?(ms|s|m|h|d|w|y))?$/i,
+      'JWT_ACCESS_TTL must be a valid duration like "15m", "1h", "7d"',
+    )
+    .default('15m'),
+  JWT_REFRESH_TTL_DAYS: z.coerce.number().int().positive().default(7),
   JWT_REFRESH_TTL: z.string().default('7d'),
 
   OBJECT_STORAGE_ENDPOINT: z.string().optional(),
@@ -23,6 +30,14 @@ export const envSchema = z.object({
   KMS_MASTER_KEY_ID: z.string().optional(),
 
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),
+
+  // Base64-encoded 32-byte key. In production this MUST come from a secret
+  // store / KMS-derived value, never checked into source — placeholder
+  // local key for dev only (Phase 9.3/9.4). Real KMS integration replaces
+  // FIELD_ENCRYPTION_MASTER_KEY entirely; nothing outside AesGcmEnvelopeEncryptionService changes when that happens.
+  FIELD_ENCRYPTION_MASTER_KEY: z
+    .string()
+    .min(44, 'FIELD_ENCRYPTION_MASTER_KEY must be a base64-encoded 32-byte key'),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;
