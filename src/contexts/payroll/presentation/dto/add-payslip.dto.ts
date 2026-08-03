@@ -5,9 +5,6 @@ import { SalaryLineItemDto } from './salary-line-item.dto';
 
 export class AddPayslipDto {
   @IsUUID()
-  organizationId!: string;
-
-  @IsUUID()
   employeeId!: string;
 
   @IsOptional()

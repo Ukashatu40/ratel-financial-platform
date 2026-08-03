@@ -1,12 +1,18 @@
 // src/contexts/expense/presentation/dto/create-expense.dto.ts
-import { IsDateString, IsIn, IsOptional, IsPositive, IsString, IsUUID, Length } from 'class-validator';
+// (remove organizationId)
+import {
+  IsDateString,
+  IsIn,
+  IsOptional,
+  IsPositive,
+  IsString,
+  IsUUID,
+  Length,
+} from 'class-validator';
 
 const SUPPORTED_SOURCE_TYPES = ['manual', 'employee', 'accountant'] as const;
 
 export class CreateExpenseDto {
-  @IsUUID()
-  organizationId!: string;
-
   @IsIn(SUPPORTED_SOURCE_TYPES)
   sourceType!: (typeof SUPPORTED_SOURCE_TYPES)[number];
 

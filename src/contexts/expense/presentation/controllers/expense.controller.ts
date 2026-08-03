@@ -1,5 +1,6 @@
 // src/contexts/expense/presentation/controllers/expense.controller.ts
-import { Body, Controller, Param, Post } from '@nestjs/common';
+// (replace entire file)
+import { Body, Controller, Param, Post, UseGuards } from '@nestjs/common';
 import { CreateExpenseHandler } from '../../application/handlers/create-expense.handler';
 import { SubmitExpenseHandler } from '../../application/handlers/submit-expense.handler';
 import { ApproveExpenseHandler } from '../../application/handlers/approve-expense.handler';
@@ -15,18 +16,15 @@ import { CreateAdjustmentCommand } from '../../application/commands/create-adjus
 import { CreateExpenseDto } from '../dto/create-expense.dto';
 import { RejectExpenseDto } from '../dto/reject-expense.dto';
 import { CreateAdjustmentDto } from '../dto/create-adjustment.dto';
-import { OrganizationScopeDto } from '../dto/organization-scope.dto';
 import { humanSource } from '../../domain/value-objects/expense-source';
+import { JwtAuthGuard } from '../../../../auth/authentication/jwt-auth.guard';
+import { PermissionGuard } from '../../../../auth/authorization/permission.guard';
+import { RequirePermission } from '../../../../auth/authorization/permission.decorator';
+import { CurrentUser } from '../../../../auth/authentication/current-user.decorator';
+import { UserPrincipal } from '../../../../shared-kernel/auth/user-principal';
 
-/**
- * NOTE: every endpoint below has a commented-out @RequirePermission line and
- * a hardcoded placeholder actor id, matching the same visible, temporary gap
- * left in FinancialPeriodController — both get resolved together once the
- * auth module lands and @CurrentUser() exists. Leaving these obvious rather
- * than silently omitted so nothing here is mistaken for "authorization
- * already handled."
- */
 @Controller({ path: 'expenses', version: '1' })
+@UseGuards(JwtAuthGuard, PermissionGuard)
 export class ExpenseController {
   constructor(
     private readonly createExpense: CreateExpenseHandler,
@@ -37,15 +35,16 @@ export class ExpenseController {
     private readonly createAdjustment: CreateAdjustmentHandler,
   ) {}
 
-  // @RequirePermission('expense:create', { scope: 'own' })
+  @RequirePermission('expense:create', { scope: 'own' })
   @Post()
-  async create(@Body() dto: CreateExpenseDto): Promise<{ id: string; expenseNumber: string }> {
-    const actorId = 'PLACEHOLDER_USER_ID'; // -> @CurrentUser().id once auth lands
-
+  async create(
+    @Body() dto: CreateExpenseDto,
+    @CurrentUser() user: UserPrincipal,
+  ): Promise<{ id: string; expenseNumber: string }> {
     return this.createExpense.execute(
       new CreateExpenseCommand(
-        dto.organizationId,
-        humanSource(dto.sourceType, actorId),
+        user.organizationId,
+        humanSource(dto.sourceType, user.id),
         BigInt(dto.amountMinorUnits),
         dto.currency,
         dto.categoryId,
@@ -58,40 +57,48 @@ export class ExpenseController {
     );
   }
 
-  // @RequirePermission('expense:create', { scope: 'own' })  // submit is self-service, same permission as create
+  @RequirePermission('expense:create', { scope: 'own' })
   @Post(':id/submit')
-  async submit(@Param('id') id: string, @Body() dto: OrganizationScopeDto): Promise<void> {
-    await this.submitExpense.execute(new SubmitExpenseCommand(id, dto.organizationId));
+  async submit(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
+    await this.submitExpense.execute(new SubmitExpenseCommand(id, user.organizationId));
   }
 
-  // @RequirePermission('expense:approve', { scope: 'department' })
+  @RequirePermission('expense:approve', { scope: 'department' })
   @Post(':id/approve')
-  async approve(@Param('id') id: string, @Body() dto: OrganizationScopeDto): Promise<void> {
-    const approverId = 'PLACEHOLDER_APPROVER_ID'; // -> @CurrentUser().id once auth lands
-    await this.approveExpense.execute(new ApproveExpenseCommand(id, dto.organizationId, approverId));
+  async approve(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
+    await this.approveExpense.execute(new ApproveExpenseCommand(id, user.organizationId, user.id));
   }
 
-  // @RequirePermission('expense:approve', { scope: 'department' })
+  @RequirePermission('expense:approve', { scope: 'department' })
   @Post(':id/reject')
-  async reject(@Param('id') id: string, @Body() dto: RejectExpenseDto): Promise<void> {
-    const approverId = 'PLACEHOLDER_APPROVER_ID';
-    await this.rejectExpense.execute(new RejectExpenseCommand(id, dto.organizationId, approverId, dto.reason));
+  async reject(
+    @Param('id') id: string,
+    @Body() dto: RejectExpenseDto,
+    @CurrentUser() user: UserPrincipal,
+  ): Promise<void> {
+    await this.rejectExpense.execute(
+      new RejectExpenseCommand(id, user.organizationId, user.id, dto.reason),
+    );
   }
 
-  // @RequirePermission('expense:create', { scope: 'own' })  // cancel is self-service on your own draft/pending expense
+  @RequirePermission('expense:create', { scope: 'own' })
   @Post(':id/cancel')
-  async cancel(@Param('id') id: string, @Body() dto: OrganizationScopeDto): Promise<void> {
-    const actorId = 'PLACEHOLDER_USER_ID';
-    await this.cancelExpense.execute(new CancelExpenseCommand(id, dto.organizationId, actorId));
+  async cancel(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
+    await this.cancelExpense.execute(new CancelExpenseCommand(id, user.organizationId, user.id));
   }
 
-  // @RequirePermission('expense:adjust', { scope: 'department' })
+  @RequirePermission('expense:adjust', { scope: 'department' })
   @Post(':id/adjustments')
-  async adjust(@Param('id') id: string, @Body() dto: CreateAdjustmentDto): Promise<{ id: string }> {
-    // organizationId intentionally NOT accepted on this endpoint — resolved
-    // server-side from the original expense being adjusted, since an
-    // adjustment can only ever target the org that owns the original.
-    // The handler already re-validates original.organizationId internally.
-    throw new Error('organizationId resolution pending @CurrentUser() wiring'); // placeholder — see note below
+  async adjust(
+    @Param('id') id: string,
+    @Body() dto: CreateAdjustmentDto,
+    @CurrentUser() user: UserPrincipal,
+  ): Promise<{ id: string }> {
+    // Finally resolved — organizationId comes from the authenticated user,
+    // never the client, closing the gap flagged back when this endpoint
+    // was first built (piece 5 of M2).
+    return this.createAdjustment.execute(
+      new CreateAdjustmentCommand(id, user.organizationId, dto.reason),
+    );
   }
 }

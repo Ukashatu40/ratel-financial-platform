@@ -1,5 +1,5 @@
 // src/contexts/payroll/presentation/controllers/payroll-run.controller.ts
-import { Body, Controller, Param, Post } from '@nestjs/common';
+import { Body, Controller, Param, Post, UseGuards } from '@nestjs/common';
 import { CreatePayrollRunHandler } from '../../application/handlers/create-payroll-run.handler';
 import { AddPayslipHandler } from '../../application/handlers/add-payslip.handler';
 import { SubmitPayrollRunHandler } from '../../application/handlers/submit-payroll-run.handler';
@@ -16,19 +16,19 @@ import { ProcessPayrollRunCommand } from '../../application/commands/process-pay
 import { CancelPayrollRunCommand } from '../../application/commands/cancel-payroll-run.command';
 import { CreatePayrollRunDto } from '../dto/create-payroll-run.dto';
 import { AddPayslipDto } from '../dto/add-payslip.dto';
-import { OrganizationScopeDto } from '../dto/organization-scope.dto';
 import { RejectPayrollRunDto } from '../dto/reject-payroll-run.dto';
 import { Money } from '../../../../shared-kernel/money/money.vo';
 import { SalaryLineItem } from '../../domain/value-objects/salary-line-item';
+import { JwtAuthGuard } from '../../../../auth/authentication/jwt-auth.guard';
+import { PermissionGuard } from '../../../../auth/authorization/permission.guard';
+import { RequirePermission } from '../../../../auth/authorization/permission.decorator';
+import { CurrentUser } from '../../../../auth/authentication/current-user.decorator';
+import { UserPrincipal } from '../../../../shared-kernel/auth/user-principal';
 
 const DEFAULT_CURRENCY = 'NGN';
 
-/**
- * Same placeholder-actor-id pattern as ExpenseController and
- * FinancialPeriodController — every @CurrentUser() gap here is deliberate
- * and temporary, resolved together once the auth module lands.
- */
 @Controller({ path: 'payroll-runs', version: '1' })
+@UseGuards(JwtAuthGuard, PermissionGuard)
 export class PayrollRunController {
   constructor(
     private readonly createPayrollRun: CreatePayrollRunHandler,
@@ -40,20 +40,23 @@ export class PayrollRunController {
     private readonly cancelPayrollRun: CancelPayrollRunHandler,
   ) {}
 
-  // @RequirePermission('payroll:create', { scope: 'organization' })
+  @RequirePermission('payroll:create', { scope: 'organization' })
   @Post()
-  async create(@Body() dto: CreatePayrollRunDto): Promise<{ id: string }> {
-    const createdById = 'PLACEHOLDER_PAYROLL_ADMIN_ID';
+  async create(
+    @Body() dto: CreatePayrollRunDto,
+    @CurrentUser() user: UserPrincipal,
+  ): Promise<{ id: string }> {
     return this.createPayrollRun.execute(
-      new CreatePayrollRunCommand(dto.organizationId, new Date(dto.runMonth), createdById),
+      new CreatePayrollRunCommand(user.organizationId, new Date(dto.runMonth), user.id),
     );
   }
 
-  // @RequirePermission('payroll:create', { scope: 'organization' })
+  @RequirePermission('payroll:create', { scope: 'organization' })
   @Post(':id/payslips')
   async addPayslipToRun(
     @Param('id') id: string,
     @Body() dto: AddPayslipDto,
+    @CurrentUser() user: UserPrincipal,
   ): Promise<{ payslipId: string }> {
     const additionalLineItems: SalaryLineItem[] = (dto.additionalLineItems ?? []).map((item) => ({
       kind: item.kind,
@@ -62,46 +65,47 @@ export class PayrollRunController {
     }));
 
     return this.addPayslip.execute(
-      new AddPayslipCommand(id, dto.organizationId, dto.employeeId, additionalLineItems),
+      new AddPayslipCommand(id, user.organizationId, dto.employeeId, additionalLineItems),
     );
   }
 
-  // @RequirePermission('payroll:create', { scope: 'organization' })
+  @RequirePermission('payroll:create', { scope: 'organization' })
   @Post(':id/submit')
-  async submit(@Param('id') id: string, @Body() dto: OrganizationScopeDto): Promise<void> {
-    await this.submitPayrollRun.execute(new SubmitPayrollRunCommand(id, dto.organizationId));
+  async submit(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
+    await this.submitPayrollRun.execute(new SubmitPayrollRunCommand(id, user.organizationId));
   }
 
-  // @RequirePermission('payroll:approve', { scope: 'organization' })
+  @RequirePermission('payroll:approve', { scope: 'organization' })
   @Post(':id/approve')
-  async approve(@Param('id') id: string, @Body() dto: OrganizationScopeDto): Promise<void> {
-    const approverId = 'PLACEHOLDER_FINANCE_DIRECTOR_ID';
+  async approve(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
     await this.approvePayrollRun.execute(
-      new ApprovePayrollRunCommand(id, dto.organizationId, approverId),
+      new ApprovePayrollRunCommand(id, user.organizationId, user.id),
     );
   }
 
-  // @RequirePermission('payroll:approve', { scope: 'organization' })
+  @RequirePermission('payroll:approve', { scope: 'organization' })
   @Post(':id/reject')
-  async reject(@Param('id') id: string, @Body() dto: RejectPayrollRunDto): Promise<void> {
-    const approverId = 'PLACEHOLDER_FINANCE_DIRECTOR_ID';
+  async reject(
+    @Param('id') id: string,
+    @Body() dto: RejectPayrollRunDto,
+    @CurrentUser() user: UserPrincipal,
+  ): Promise<void> {
     await this.rejectPayrollRun.execute(
-      new RejectPayrollRunCommand(id, dto.organizationId, approverId, dto.reason),
+      new RejectPayrollRunCommand(id, user.organizationId, user.id, dto.reason),
     );
   }
 
-  // @RequirePermission('payroll:create', { scope: 'organization' })
+  @RequirePermission('payroll:create', { scope: 'organization' })
   @Post(':id/process')
-  async process(@Param('id') id: string, @Body() dto: OrganizationScopeDto): Promise<void> {
-    await this.processPayrollRun.execute(new ProcessPayrollRunCommand(id, dto.organizationId));
+  async process(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
+    await this.processPayrollRun.execute(new ProcessPayrollRunCommand(id, user.organizationId));
   }
 
-  // @RequirePermission('payroll:create', { scope: 'organization' })
+  @RequirePermission('payroll:create', { scope: 'organization' })
   @Post(':id/cancel')
-  async cancel(@Param('id') id: string, @Body() dto: OrganizationScopeDto): Promise<void> {
-    const actorId = 'PLACEHOLDER_PAYROLL_ADMIN_ID';
+  async cancel(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
     await this.cancelPayrollRun.execute(
-      new CancelPayrollRunCommand(id, dto.organizationId, actorId),
+      new CancelPayrollRunCommand(id, user.organizationId, user.id),
     );
   }
 }
