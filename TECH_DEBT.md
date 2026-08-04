@@ -73,11 +73,33 @@ production, with rotation support.
 call. The pure-function crypto core (`aes-gcm-envelope-crypto.ts`) was
 deliberately built KEK-source-agnostic, so this should be a contained change.
 
+### 6. `principal.organizationId` is derived from `roleAssignments[0]`, arbitrarily
+**Where:** `AuthService.login()`, `AuthService.refresh()`
+**What:** The JWT's `organizationId` claim is taken from the FIRST role
+assignment row returned for the user (`user.roleAssignments[0].organizationId`),
+with no explicit ordering guarantee on that query. Under today's confirmed
+single-tenant assumption (only Ratel-Plus Nigeria Ltd exists — Phase 1.3),
+every role assignment for every seeded user has the same `organizationId`
+regardless, so this is harmless in practice right now.
+**Why acceptable so far:** No user in the system currently holds roles
+across more than one organization, since only one organization exists.
+**To close:** The moment multi-organization support becomes real (Phase 1's
+explicit future-capability), this silently breaks: a user with roles in two
+orgs would get logged into whichever org's role happened to be first in an
+unordered query result — not necessarily the org they intended to act in.
+Proper fix requires either (a) an explicit "which organization are you
+logging into" selection at login time when a user has multi-org roles, or
+(b) a separate token-issuance step per organization context, chosen
+explicitly rather than inferred. Flagged at the point `AuthService` was
+built rather than left implicit — this is a design gap to revisit
+deliberately when multi-tenancy work actually begins, not a bug to patch
+reactively later.
+
 ---
 
 ## Audit Trail
 
-### 6. Hash chain read-then-write is not atomic
+### 7. Hash chain read-then-write is not atomic
 **Where:** `AuditLogService.record()`
 **What:** Reads the last entry's hash, then inserts a new row, as two
 separate statements. Under concurrent writers, two entries could read the
@@ -89,7 +111,7 @@ concurrent writers exist yet.
 move hash computation into a DB trigger (as Phase 6.2 originally specified).
 Must be fixed before running more than one dispatcher instance.
 
-### 7. No field-level old/new value diffing
+### 8. No field-level old/new value diffing
 **Where:** `AuditSubscriber`
 **What:** Captures each domain event's full payload as `newValue`; does not
 compute or store a genuine before/after diff of specific fields on direct
@@ -100,7 +122,7 @@ as literal per-field old/new values implied by the original schema design.
 pass forward an explicit diff — a materially larger change touching every
 aggregate, not just the audit subscriber.
 
-### 8. Failed event delivery to one subscriber is only logged, not retried
+### 9. Failed event delivery to one subscriber is only logged, not retried
 **Where:** `DomainEventDispatcher.dispatch()`
 **What:** Uses `Promise.allSettled` across handlers so one failing subscriber
 doesn't block others — but a failed subscriber's failure is only logged, not
@@ -113,27 +135,25 @@ Layer (Phase 8.3) to per-subscriber dispatch failures.
 
 ## Domain / Business Logic
 
-### 9. `createAdjustment` re-approval threshold is a guess, not confirmed policy
+### 10. `createAdjustment` re-approval threshold is a guess, not confirmed policy
 **Where:** `ExpenseAdjustmentApprovalPolicy`
 **What:** ₦1,000,000 threshold for requiring re-approval on an adjustment was
 chosen as "higher than the finance-director threshold" reasoning, not a
 number Ratel-Plus actually specified.
 **To close:** Confirm the real policy and adjust the constant.
 
-### 10. `PayrollRun.reject()` returns to `draft`, not a terminal `rejected` state
+### 11. `PayrollRun.reject()` returns to `draft`, not a terminal `rejected` state
 **Where:** `PayrollRun` aggregate.
 **What:** Deliberate design choice (confirmed with you) — differs from
 Expense's terminal `rejected` status. Documented here only so the asymmetry
 between the two contexts isn't mistaken for an inconsistency bug later.
 
-### 11. `ExpenseController.adjust()` throws — organizationId resolution unresolved
-**Where:** `ExpenseController`, the `POST /:id/adjustments` endpoint.
-**What:** Deliberately left throwing rather than accepting `organizationId`
-from the request body (a security gap — should come from the authenticated
-user's own org membership, not client-supplied input).
-**To close:** Wire once `@CurrentUser()` exists (same blocker as #1).
+### 12. ~~`ExpenseController.adjust()` throws~~ — RESOLVED
+Resolved alongside item #1 — `organizationId` now derives from
+`@CurrentUser().organizationId` rather than the request body, and the
+endpoint no longer throws a placeholder error.
 
-### 12. `ProcessPayrollRunHandler` does not perform real disbursement
+### 13. `ProcessPayrollRunHandler` does not perform real disbursement
 **Where:** `ProcessPayrollRunHandler`
 **What:** Flips `PayrollRun` state (`approved → processing → completed`)
 synchronously with no actual bank transfer / payment gateway integration.
@@ -144,7 +164,7 @@ chosen, per the original blueprint's `jobs/processors/` design.
 
 ## Data Integrity
 
-### 17. `UserRoleAssignment`'s compound unique doesn't fully hold with nullable `departmentId`
+### 14. `UserRoleAssignment`'s compound unique doesn't fully hold with nullable `departmentId`
 **Where:** `@@unique([userId, role, departmentId])` on `UserRoleAssignment`.
 **What:** Postgres treats every `NULL` as distinct within a unique index, so
 this constraint does NOT prevent two rows with the same `(userId, role,
@@ -168,7 +188,7 @@ seed-only quirk with no production exposure.
 
 ## Performance
 
-### 13. `expenses` table is not actually partitioned
+### 15. `expenses` table is not actually partitioned
 **Where:** Prisma migration for the Expense context.
 **What:** Phase 6.2 specified range partitioning by `expense_date` for scale.
 The composite PK `(id, expenseDate)` was added in anticipation, but the
@@ -178,7 +198,7 @@ on every subsequent `migrate dev`.
 **To close:** Hand-written migration, done once volume actually justifies it
 (Phase 6.2's original reasoning still applies).
 
-### 14. Payroll run reads decrypt every payslip individually
+### 16. Payroll run reads decrypt every payslip individually
 **Where:** `PrismaPayrollRunRepository.findById` / `findByOrgAndMonth`
 **What:** N decryption calls per read (one per payslip in the run) — fine at
 current volume, will matter once runs have hundreds of employees.
@@ -188,13 +208,13 @@ current volume, will matter once runs have hundreds of employees.
 
 ## Dependency Management
 
-### 15. TypeScript pinned to 5.9.3, not latest (7.0.2 at time of writing)
+### 17. TypeScript pinned to 5.9.3, not latest (7.0.2 at time of writing)
 **Where:** `package.json` devDependencies.
 **Why:** TS7 is a very recent major version jump; NestJS 11's decorator
 metadata pipeline and `ts-jest` compatibility weren't confirmed. Revisit in
 isolation once the ecosystem catches up.
 
-### 16. `bullmq` pinned to 5.81.3, `ioredis` pinned to 5.11.1
+### 18. `bullmq` pinned to 5.81.3, `ioredis` pinned to 5.11.1
 **Where:** `package.json` dependencies.
 **Why:** `bullmq@6.x` and `ioredis@6.x` were published within days of this
 build and are NOT within `@nestjs/bullmq@11.0.4`'s declared peer range
