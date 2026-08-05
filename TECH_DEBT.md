@@ -181,17 +181,22 @@ actual Prisma 7 setup:
    stopped while a client still held a connection) emits an unhandled
    `'error'` event that crashes the entire Node process, not just the one
    affected query.
-**Why acceptable so far:** The integration test harness got fixed with a
-`pool.on('error', ...)` listener at the point this was discovered.
-**To close:** Confirm the SAME listener has been added to `PrismaService`'s
-`Pool` construction — this is not optional test hygiene, it's a real
-production reliability gap: an unhandled connection drop against the live
-database would currently crash the whole running API, not just log a
-warning and continue. This directly undermines the "Failure Recovery"
-requirement from the original architecture brief. Verify this is fixed in
-`PrismaService` specifically, since that's the one path with real
-production exposure (the seed script and test helper are lower-stakes by
-comparison).
+**Why acceptable so far:** The integration and e2e test harnesses both got
+fixed with a `pool.on('error', ...)` listener at the point this was
+discovered, and the e2e suite (login → create → submit → approve, plus
+audit trail verification) now passes cleanly end-to-end against real
+Postgres + Redis containers, confirming the pattern works.
+**To close:** `PrismaService`'s `pool.on('error', ...)` handler currently
+mirrors the TEST harness's pattern exactly (silently swallowing
+`'terminating connection'`/`57P01` with no log at all) — this is the wrong
+choice for production code specifically. A live connection termination is
+meaningful operational signal (DB restart, network partition, pool
+exhaustion, ops action) that should always be logged, just at a lower
+severity for this expected-during-restart case vs. `error` severity for
+anything else. The test harness's silent-swallow is fine because we
+control exactly why/when it fires there; `PrismaService` needs the same
+listener structure but with logging retained for every branch, never a
+fully silent case.
 
 ### 20. No `GET` endpoints exist on `ExpenseController` or `PayrollRunController`
 **Where:** `src/contexts/expense/presentation/controllers/expense.controller.ts`,
