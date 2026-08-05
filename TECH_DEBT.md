@@ -162,6 +162,57 @@ chosen, per the original blueprint's `jobs/processors/` design.
 
 ---
 
+### 19. Prisma 7 requires driver adapters; every raw `pg.Pool` needs an `error` listener
+**Where:** `src/prisma/prisma.service.ts`, `prisma/seed/seed.ts`,
+`test/integration/setup/db-helper.ts` — anywhere a `PrismaClient` is
+constructed.
+**What:** Two related, discovered-together facts about this codebase's
+actual Prisma 7 setup:
+1. Prisma 7 removed the Rust query engine binary; `PrismaClientOptions` no
+   longer accepts a `datasourceUrl` string override. Every `PrismaClient`
+   construction now goes through a `@prisma/adapter-pg` wrapping a
+   manually-constructed `pg.Pool` — confirmed necessary project-wide (test
+   helper, `PrismaService`, and the seed script all needed this), not a
+   test-only workaround.
+2. `node-postgres` (`pg`) requires an explicit `.on('error', ...)` listener
+   on every `Pool` instance. Without one, a pooled client losing its
+   connection (network blip, DB restart, or — as discovered via the
+   integration test harness — a Testcontainers-managed Postgres being
+   stopped while a client still held a connection) emits an unhandled
+   `'error'` event that crashes the entire Node process, not just the one
+   affected query.
+**Why acceptable so far:** The integration test harness got fixed with a
+`pool.on('error', ...)` listener at the point this was discovered.
+**To close:** Confirm the SAME listener has been added to `PrismaService`'s
+`Pool` construction — this is not optional test hygiene, it's a real
+production reliability gap: an unhandled connection drop against the live
+database would currently crash the whole running API, not just log a
+warning and continue. This directly undermines the "Failure Recovery"
+requirement from the original architecture brief. Verify this is fixed in
+`PrismaService` specifically, since that's the one path with real
+production exposure (the seed script and test helper are lower-stakes by
+comparison).
+
+### 20. No `GET` endpoints exist on `ExpenseController` or `PayrollRunController`
+**Where:** `src/contexts/expense/presentation/controllers/expense.controller.ts`,
+`src/contexts/payroll/presentation/controllers/payroll-run.controller.ts`
+**What:** Only mutating (`POST`) endpoints were ever built. There is no way
+for an API client to fetch a single expense/payroll run by ID, or list them
+with the filtering/pagination/sorting design from Phase 7.1–7.2. Discovered
+concretely while writing e2e tests: verifying an expense's status after
+`submit`/`approve` required querying the database directly via a test-only
+Prisma client, because the real API offers no way to check.
+**Why acceptable so far:** All testing to date (manual `curl`, unit,
+integration, e2e) has been able to work around this by checking DB state
+directly or trusting command handler return values — but this means the
+API is currently write-only from a real client's perspective, which isn't
+viable for an actual frontend or integration to consume.
+**To close:** Build `GET /:id` and `GET /` (cursor-paginated, per Phase 7.1)
+for both controllers, backed by dedicated query handlers — this is a
+genuinely missing application-layer piece (query side), not just a
+controller gap; no `GetExpenseByIdQuery`/`GetExpenseByIdHandler` exists yet
+either.
+
 ## Data Integrity
 
 ### 14. `UserRoleAssignment`'s compound unique doesn't fully hold with nullable `departmentId`
