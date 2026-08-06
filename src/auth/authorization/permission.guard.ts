@@ -1,5 +1,11 @@
 // src/auth/authorization/permission.guard.ts
-import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from '@nestjs/common';
+import {
+  CanActivate,
+  ExecutionContext,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PERMISSION_KEY, PermissionRequirement } from './permission.decorator';
@@ -50,7 +56,15 @@ export class PermissionGuard implements CanActivate {
     if (!resourceId) return true;
 
     const scopeInfo = await this.scopeRegistry.resolve(requirement.resourceType, resourceId);
-    if (!scopeInfo) throw new ForbiddenException('Resource not found or not accessible');
+    if (!scopeInfo) {
+      // 404, not 403 — the resource genuinely doesn't exist, so there's
+      // nothing to be "forbidden" from. Using 403 here would have leaked
+      // information in the wrong direction: it implies "this exists but
+      // you can't see it," which is worse than just saying "not found,"
+      // the same way EntityNotFoundError already behaves for org-mismatch
+      // cases elsewhere in the codebase.
+      throw new NotFoundException(`Resource not found`);
+    }
 
     const hasOwnGrant = grants.some((g) => g.scope === 'own');
     if (hasOwnGrant && scopeInfo.requesterId === user.id) return true;
