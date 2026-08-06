@@ -17,6 +17,8 @@ import { RejectPayrollRunHandler } from './application/handlers/reject-payroll-r
 import { ProcessPayrollRunHandler } from './application/handlers/process-payroll-run.handler';
 import { CancelPayrollRunHandler } from './application/handlers/cancel-payroll-run.handler';
 import { PayrollRunController } from './presentation/controllers/payroll-run.controller';
+import { GetPayrollRunByIdHandler } from './application/handlers/get-payroll-run-by-id.handler';
+import { ListPayrollRunsHandler } from './application/handlers/list-payroll-runs.handler';
 
 @Module({
   // Cross-context dependency, same shape as ExpenseModule's — pulling in
@@ -36,6 +38,8 @@ import { PayrollRunController } from './presentation/controllers/payroll-run.con
     RejectPayrollRunHandler,
     ProcessPayrollRunHandler,
     CancelPayrollRunHandler,
+    GetPayrollRunByIdHandler,
+    ListPayrollRunsHandler,
   ],
   exports: [
     CreatePayrollRunHandler,
@@ -45,6 +49,8 @@ import { PayrollRunController } from './presentation/controllers/payroll-run.con
     RejectPayrollRunHandler,
     ProcessPayrollRunHandler,
     CancelPayrollRunHandler,
+    GetPayrollRunByIdHandler,
+    ListPayrollRunsHandler,
   ],
 })
 export class PayrollModule {}

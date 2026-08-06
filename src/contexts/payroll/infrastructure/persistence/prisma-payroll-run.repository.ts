@@ -9,7 +9,10 @@ import {
 import { Money } from '../../../../shared-kernel/money/money.vo';
 import { PayrollRun, PayrollRunProps } from '../../domain/aggregates/payroll-run.aggregate';
 import { Payslip, PayslipProps } from '../../domain/entities/payslip.entity';
-import { PayrollRunRepository } from '../../domain/ports/payroll-run-repository.port';
+import {
+  PayrollRunListFilter,
+  PayrollRunRepository,
+} from '../../domain/ports/payroll-run-repository.port';
 import { SalaryLineItem } from '../../domain/value-objects/salary-line-item';
 import { TaxComputation } from '../../domain/value-objects/tax-computation';
 import {
@@ -22,6 +25,7 @@ import {
   serializeTaxComputation,
   SerializedTaxComputation,
 } from '../../domain/value-objects/tax-computation';
+import { Page } from '../../../../shared-kernel/pagination/cursor';
 
 interface SerializedPayslipDetail {
   salaryStructureSnapshot: Record<string, unknown>; // already JSON-safe (toSnapshot() serializes internally now)
@@ -63,6 +67,38 @@ export class PrismaPayrollRunRepository implements PayrollRunRepository {
       include: { payslips: true },
     });
     return row ? this.toDomain(row, row.payslips) : null;
+  }
+
+  async findMany(filter: PayrollRunListFilter): Promise<Page<PayrollRun>> {
+    const where: any = { organizationId: filter.organizationId };
+    if (filter.cursor) {
+      where.OR = [
+        { createdAt: { lt: new Date(filter.cursor.createdAt) } },
+        { createdAt: new Date(filter.cursor.createdAt), id: { lt: filter.cursor.id } },
+      ];
+    }
+
+    const rows = await this.prisma.payrollRun.findMany({
+      where,
+      include: { payslips: true },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: filter.limit + 1,
+    });
+
+    const hasMore = rows.length > filter.limit;
+    const pageRows = hasMore ? rows.slice(0, filter.limit) : rows;
+    const items = await Promise.all(pageRows.map((row) => this.toDomain(row, row.payslips)));
+
+    const nextCursor = hasMore
+      ? Buffer.from(
+          JSON.stringify({
+            createdAt: pageRows.at(-1)!.createdAt.toISOString(),
+            id: pageRows.at(-1)!.id,
+          }),
+        ).toString('base64url')
+      : null;
+
+    return { data: items, nextCursor };
   }
 
   async save(run: PayrollRun, tx: TransactionClient): Promise<void> {

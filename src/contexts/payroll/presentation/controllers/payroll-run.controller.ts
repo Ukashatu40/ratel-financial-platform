@@ -1,5 +1,5 @@
 // src/contexts/payroll/presentation/controllers/payroll-run.controller.ts
-import { Body, Controller, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Param, Post, UseGuards, Get, Query } from '@nestjs/common';
 import { CreatePayrollRunHandler } from '../../application/handlers/create-payroll-run.handler';
 import { AddPayslipHandler } from '../../application/handlers/add-payslip.handler';
 import { SubmitPayrollRunHandler } from '../../application/handlers/submit-payroll-run.handler';
@@ -24,6 +24,11 @@ import { PermissionGuard } from '../../../../auth/authorization/permission.guard
 import { RequirePermission } from '../../../../auth/authorization/permission.decorator';
 import { CurrentUser } from '../../../../auth/authentication/current-user.decorator';
 import { UserPrincipal } from '../../../../shared-kernel/auth/user-principal';
+import { GetPayrollRunByIdHandler } from '../../application/handlers/get-payroll-run-by-id.handler';
+import { ListPayrollRunsHandler } from '../../application/handlers/list-payroll-runs.handler';
+import { GetPayrollRunByIdQuery } from '../../application/queries/get-payroll-run-by-id.query';
+import { ListPayrollRunsQuery } from '../../application/queries/list-payroll-runs.query';
+import { ListPayrollRunsDto } from '../dto/list-payroll-runs.dto';
 
 const DEFAULT_CURRENCY = 'NGN';
 
@@ -38,6 +43,8 @@ export class PayrollRunController {
     private readonly rejectPayrollRun: RejectPayrollRunHandler,
     private readonly processPayrollRun: ProcessPayrollRunHandler,
     private readonly cancelPayrollRun: CancelPayrollRunHandler,
+    private readonly getPayrollRunById: GetPayrollRunByIdHandler,
+    private readonly listPayrollRuns: ListPayrollRunsHandler,
   ) {}
 
   @RequirePermission('payroll:create')
@@ -48,6 +55,20 @@ export class PayrollRunController {
   ): Promise<{ id: string }> {
     return this.createPayrollRun.execute(
       new CreatePayrollRunCommand(user.organizationId, new Date(dto.runMonth), user.id),
+    );
+  }
+
+  @RequirePermission('payroll:view_sensitive')
+  @Get(':id')
+  async getById(@Param('id') id: string, @CurrentUser() user: UserPrincipal) {
+    return this.getPayrollRunById.execute(new GetPayrollRunByIdQuery(id, user.organizationId));
+  }
+
+  @RequirePermission('payroll:view_sensitive')
+  @Get()
+  async list(@Query() dto: ListPayrollRunsDto, @CurrentUser() user: UserPrincipal) {
+    return this.listPayrollRuns.execute(
+      new ListPayrollRunsQuery(user.organizationId, dto.cursor, dto.limit),
     );
   }
 
