@@ -12,6 +12,8 @@ import { AuthService } from './authentication/auth.service';
 import { RefreshTokenService } from './authentication/refresh-token.service';
 import { PermissionGuard } from './authorization/permission.guard';
 import { AuthController } from './presentation/controllers/auth.controller';
+import { USER_ROLE_SERVICE } from '../shared-kernel/auth/user-role.port';
+import { PrismaUserRoleService } from './authorization/prisma-user-role.service';
 
 @Global()
 @Module({
@@ -27,7 +29,14 @@ import { AuthController } from './presentation/controllers/auth.controller';
     }),
   ],
   controllers: [AuthController],
-  providers: [JwtStrategy, JwtAuthGuard, PermissionGuard, AuthService, RefreshTokenService],
-  exports: [JwtAuthGuard, PermissionGuard],
+  providers: [
+    JwtStrategy,
+    JwtAuthGuard,
+    PermissionGuard,
+    AuthService,
+    RefreshTokenService,
+    { provide: USER_ROLE_SERVICE, useClass: PrismaUserRoleService },
+  ],
+  exports: [JwtAuthGuard, PermissionGuard, USER_ROLE_SERVICE],
 })
 export class AuthModule {}

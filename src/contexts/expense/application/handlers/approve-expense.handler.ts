@@ -3,8 +3,14 @@ import { Inject, Injectable } from '@nestjs/common';
 import { CommandHandler } from '../../../../shared-kernel/cqrs/command-handler';
 import { UNIT_OF_WORK, UnitOfWork } from '../../../../shared-kernel/unit-of-work/unit-of-work.port';
 import { OutboxService } from '../../../../shared-kernel/outbox/outbox.service';
-import { EntityNotFoundError, PeriodClosedError } from '../../../../shared-kernel/errors/domain-error';
-import { PERIOD_STATUS_PORT, PeriodStatusPort } from '../../../../shared-kernel/period-status/period-status.port';
+import {
+  EntityNotFoundError,
+  PeriodClosedError,
+} from '../../../../shared-kernel/errors/domain-error';
+import {
+  PERIOD_STATUS_PORT,
+  PeriodStatusPort,
+} from '../../../../shared-kernel/period-status/period-status.port';
 import {
   APPROVAL_PROGRESS_REPOSITORY,
   ApprovalProgressRepository,
@@ -38,7 +44,7 @@ export class ApproveExpenseHandler implements CommandHandler<ApproveExpenseComma
       const progress = await this.progressRepo.findByItemId(expense.id, tx);
       if (!progress) throw new EntityNotFoundError('ApprovalProgress', expense.id);
 
-      const { isFinalApproval } = this.workflowEngine.recordApproval(
+      const { isFinalApproval } = await this.workflowEngine.recordApproval(
         expenseToApprovable(expense),
         progress,
         cmd.approverId,

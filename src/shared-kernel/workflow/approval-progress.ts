@@ -1,5 +1,5 @@
 // src/shared-kernel/workflow/approval-progress.ts
-import { ApprovalChain } from "./approval-chain";
+import { ApprovalChain, ApprovalStep } from './approval-chain';
 import { DomainError } from '../errors/domain-error';
 
 export interface ApprovalRecord {
@@ -21,7 +21,11 @@ export class ApprovalProgress {
     return new ApprovalProgress(itemId, chain, []);
   }
 
-  static reconstitute(itemId: string, chain: ApprovalChain, records: ApprovalRecord[]): ApprovalProgress {
+  static reconstitute(
+    itemId: string,
+    chain: ApprovalChain,
+    records: ApprovalRecord[],
+  ): ApprovalProgress {
     return new ApprovalProgress(itemId, chain, records);
   }
 
@@ -41,11 +45,21 @@ export class ApprovalProgress {
 
   recordRejection(approverId: string, reason: string): void {
     const stepOrder = this.currentStepOrder();
-    this.records.push({ stepOrder, approverId, decidedAt: new Date(), decision: 'rejected', reason });
+    this.records.push({
+      stepOrder,
+      approverId,
+      decidedAt: new Date(),
+      decision: 'rejected',
+      reason,
+    });
   }
 
   getRecords(): readonly ApprovalRecord[] {
     return this.records;
+  }
+
+  currentStepRequirement(): ApprovalStep | null {
+    return this.chain.stepAt(this.currentStepOrder());
   }
 }
 
@@ -54,6 +68,8 @@ export class NoSuchApprovalStepError extends DomainError {
   readonly httpStatus = 409;
 
   constructor(itemId: string, stepOrder: number) {
-    super(`No approval step ${stepOrder} defined for item ${itemId} — chain is shorter than expected`);
+    super(
+      `No approval step ${stepOrder} defined for item ${itemId} — chain is shorter than expected`,
+    );
   }
 }

@@ -50,3 +50,14 @@ export class NoOpenPeriodError extends DomainError {
     super(`Organization ${organizationId} has no currently open financial period`);
   }
 }
+
+export class ApproverRoleMismatchError extends DomainError {
+  readonly code = 'approver-role-mismatch';
+  readonly httpStatus = 403;
+
+  constructor(approverId: string, requiredRole: string) {
+    super(
+      `Approver ${approverId} does not hold the required role '${requiredRole}' for this approval step`,
+    );
+  }
+}

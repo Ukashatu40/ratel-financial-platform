@@ -3,14 +3,23 @@ import { Inject, Injectable } from '@nestjs/common';
 import { CommandHandler } from '../../../../shared-kernel/cqrs/command-handler';
 import { UNIT_OF_WORK, UnitOfWork } from '../../../../shared-kernel/unit-of-work/unit-of-work.port';
 import { OutboxService } from '../../../../shared-kernel/outbox/outbox.service';
-import { EntityNotFoundError, PeriodClosedError } from '../../../../shared-kernel/errors/domain-error';
-import { PERIOD_STATUS_PORT, PeriodStatusPort } from '../../../../shared-kernel/period-status/period-status.port';
+import {
+  EntityNotFoundError,
+  PeriodClosedError,
+} from '../../../../shared-kernel/errors/domain-error';
+import {
+  PERIOD_STATUS_PORT,
+  PeriodStatusPort,
+} from '../../../../shared-kernel/period-status/period-status.port';
 import {
   APPROVAL_PROGRESS_REPOSITORY,
   ApprovalProgressRepository,
 } from '../../../../shared-kernel/workflow/approval-progress-repository.port';
 import { WorkflowEngine } from '../../../../shared-kernel/workflow/workflow-engine';
-import { PAYROLL_RUN_REPOSITORY, PayrollRunRepository } from '../../domain/ports/payroll-run-repository.port';
+import {
+  PAYROLL_RUN_REPOSITORY,
+  PayrollRunRepository,
+} from '../../domain/ports/payroll-run-repository.port';
 import { payrollRunToApprovable } from '../mappers/payroll-run-to-approvable.mapper';
 import { ApprovePayrollRunCommand } from '../commands/approve-payroll-run.command';
 
@@ -42,7 +51,7 @@ export class ApprovePayrollRunHandler implements CommandHandler<ApprovePayrollRu
 
       // Same chokepoint as Expense — SelfApprovalNotAllowedError fires here
       // too if createdById === approverId, reused without modification.
-      const { isFinalApproval } = this.workflowEngine.recordApproval(
+      const { isFinalApproval } = await this.workflowEngine.recordApproval(
         payrollRunToApprovable(run, DEFAULT_CURRENCY),
         progress,
         cmd.approverId,
