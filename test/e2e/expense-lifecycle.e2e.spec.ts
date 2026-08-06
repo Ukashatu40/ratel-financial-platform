@@ -231,4 +231,97 @@ describe('Expense lifecycle (e2e)', () => {
       expect(auditEntries[i].prevHash).toBe(auditEntries[i - 1].entryHash);
     }
   });
+
+  describe('cross-department authorization (TECH_DEBT #3b)', () => {
+    it('denies a department_head from Department B approving an expense in Department A', async () => {
+      const prisma = getE2eDbClient();
+      const passwordHash = await hash('E2ePassword!23');
+
+      // Second department, with its own department_head — distinct from
+      // the shared beforeEach's deptId/depthead@e2e.test fixture.
+      const deptB = await prisma.department.create({
+        data: { organizationId: orgId, name: 'Sales' },
+      });
+      const deptBHead = await prisma.user.create({
+        data: { email: 'deptbhead@e2e.test', passwordHash },
+      });
+      await prisma.userRoleAssignment.create({
+        data: {
+          userId: deptBHead.id,
+          organizationId: orgId,
+          role: 'department_head',
+          departmentId: deptB.id,
+        },
+      });
+
+      // Create + submit an expense in Department A (the shared deptId fixture)
+      const employeeToken = await loginAs('employee@e2e.test');
+      const createRes = await request(server)
+        .post('/api/v1/expenses')
+        .set('Authorization', `Bearer ${employeeToken}`)
+        .send({
+          sourceType: 'employee',
+          amountMinorUnits: 30000,
+          currency: 'NGN',
+          categoryId,
+          departmentId: deptId, // Department A
+          expenseDate: '2026-08-02',
+        })
+        .expect(201);
+
+      await request(server)
+        .post(`/api/v1/expenses/${createRes.body.id}/submit`)
+        .set('Authorization', `Bearer ${employeeToken}`)
+        .expect(201);
+
+      // Department B's head attempts to approve Department A's expense —
+      // they hold expense:approve at department scope, but their OWN
+      // department assignment (deptB.id) doesn't match the resource's
+      // department (deptId) — this is exactly the check added to close
+      // TECH_DEBT #3, and this is its first real test.
+      const deptBHeadToken = await loginAs('deptbhead@e2e.test');
+      await request(server)
+        .post(`/api/v1/expenses/${createRes.body.id}/approve`)
+        .set('Authorization', `Bearer ${deptBHeadToken}`)
+        .expect(403);
+
+      // Confirm the expense is genuinely untouched — still pending, not
+      // silently half-approved or corrupted by the rejected attempt.
+      const dbExpense = await prisma.expense.findFirstOrThrow({ where: { id: createRes.body.id } });
+      expect(dbExpense.status).toBe('pending_approval');
+    });
+
+    it('allows the SAME department_head to approve an expense in their own department', async () => {
+      // Positive-case control for the test above — proves the guard isn't
+      // just blocking everything, only genuine cross-department attempts.
+      const employeeToken = await loginAs('employee@e2e.test');
+      const createRes = await request(server)
+        .post('/api/v1/expenses')
+        .set('Authorization', `Bearer ${employeeToken}`)
+        .send({
+          sourceType: 'employee',
+          amountMinorUnits: 30000,
+          currency: 'NGN',
+          categoryId,
+          departmentId: deptId,
+          expenseDate: '2026-08-02',
+        })
+        .expect(201);
+
+      await request(server)
+        .post(`/api/v1/expenses/${createRes.body.id}/submit`)
+        .set('Authorization', `Bearer ${employeeToken}`)
+        .expect(201);
+
+      const deptHeadToken = await loginAs('depthead@e2e.test'); // this IS deptId's own head, from the shared beforeEach
+      await request(server)
+        .post(`/api/v1/expenses/${createRes.body.id}/approve`)
+        .set('Authorization', `Bearer ${deptHeadToken}`)
+        .expect(201);
+
+      const prisma = getE2eDbClient();
+      const dbExpense = await prisma.expense.findFirstOrThrow({ where: { id: createRes.body.id } });
+      expect(dbExpense.status).toBe('approved');
+    });
+  });
 });
