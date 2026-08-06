@@ -5,10 +5,11 @@ export const PERMISSION_KEY = 'permission';
 
 export interface PermissionRequirement {
   permission: string;
-  scope: 'own' | 'department' | 'organization';
+  resourceType?: string; // only needed when a resource-level (own/department) check applies
 }
 
-export const RequirePermission = (
-  permission: string,
-  options: { scope: PermissionRequirement['scope'] },
-) => SetMetadata(PERMISSION_KEY, { permission, scope: options.scope } as PermissionRequirement);
+export const RequirePermission = (permission: string, options?: { resourceType?: string }) =>
+  SetMetadata(PERMISSION_KEY, {
+    permission,
+    resourceType: options?.resourceType,
+  } as PermissionRequirement);
