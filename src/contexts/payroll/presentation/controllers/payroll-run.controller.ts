@@ -40,7 +40,7 @@ export class PayrollRunController {
     private readonly cancelPayrollRun: CancelPayrollRunHandler,
   ) {}
 
-  @RequirePermission('payroll:create', { scope: 'organization' })
+  @RequirePermission('payroll:create')
   @Post()
   async create(
     @Body() dto: CreatePayrollRunDto,
@@ -51,7 +51,7 @@ export class PayrollRunController {
     );
   }
 
-  @RequirePermission('payroll:create', { scope: 'organization' })
+  @RequirePermission('payroll:create')
   @Post(':id/payslips')
   async addPayslipToRun(
     @Param('id') id: string,
@@ -69,13 +69,13 @@ export class PayrollRunController {
     );
   }
 
-  @RequirePermission('payroll:create', { scope: 'organization' })
+  @RequirePermission('payroll:create')
   @Post(':id/submit')
   async submit(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
     await this.submitPayrollRun.execute(new SubmitPayrollRunCommand(id, user.organizationId));
   }
 
-  @RequirePermission('payroll:approve', { scope: 'organization' })
+  @RequirePermission('payroll:approve')
   @Post(':id/approve')
   async approve(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
     await this.approvePayrollRun.execute(
@@ -83,7 +83,7 @@ export class PayrollRunController {
     );
   }
 
-  @RequirePermission('payroll:approve', { scope: 'organization' })
+  @RequirePermission('payroll:approve')
   @Post(':id/reject')
   async reject(
     @Param('id') id: string,
@@ -95,13 +95,13 @@ export class PayrollRunController {
     );
   }
 
-  @RequirePermission('payroll:create', { scope: 'organization' })
+  @RequirePermission('payroll:create')
   @Post(':id/process')
   async process(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
     await this.processPayrollRun.execute(new ProcessPayrollRunCommand(id, user.organizationId));
   }
 
-  @RequirePermission('payroll:create', { scope: 'organization' })
+  @RequirePermission('payroll:create')
   @Post(':id/cancel')
   async cancel(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
     await this.cancelPayrollRun.execute(

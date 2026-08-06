@@ -35,7 +35,7 @@ export class ExpenseController {
     private readonly createAdjustment: CreateAdjustmentHandler,
   ) {}
 
-  @RequirePermission('expense:create', { scope: 'own' })
+  @RequirePermission('expense:create') // was: { scope: 'own' } — create has no resource yet
   @Post()
   async create(
     @Body() dto: CreateExpenseDto,
@@ -57,19 +57,19 @@ export class ExpenseController {
     );
   }
 
-  @RequirePermission('expense:create', { scope: 'own' })
+  @RequirePermission('expense:create', { resourceType: 'expense' }) // now checks: is this YOUR draft, if you're 'own'-scoped
   @Post(':id/submit')
   async submit(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
     await this.submitExpense.execute(new SubmitExpenseCommand(id, user.organizationId));
   }
 
-  @RequirePermission('expense:approve', { scope: 'department' })
+  @RequirePermission('expense:approve', { resourceType: 'expense' }) // now checks: is this YOUR department, if you're 'department'-scoped
   @Post(':id/approve')
   async approve(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
     await this.approveExpense.execute(new ApproveExpenseCommand(id, user.organizationId, user.id));
   }
 
-  @RequirePermission('expense:approve', { scope: 'department' })
+  @RequirePermission('expense:approve', { resourceType: 'expense' })
   @Post(':id/reject')
   async reject(
     @Param('id') id: string,
@@ -81,13 +81,13 @@ export class ExpenseController {
     );
   }
 
-  @RequirePermission('expense:create', { scope: 'own' })
+  @RequirePermission('expense:create', { resourceType: 'expense' })
   @Post(':id/cancel')
   async cancel(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
     await this.cancelExpense.execute(new CancelExpenseCommand(id, user.organizationId, user.id));
   }
 
-  @RequirePermission('expense:adjust', { scope: 'department' })
+  @RequirePermission('expense:adjust', { resourceType: 'expense' })
   @Post(':id/adjustments')
   async adjust(
     @Param('id') id: string,

@@ -22,7 +22,7 @@ export class FinancialPeriodController {
     private readonly getCurrentOpenPeriod: GetCurrentOpenPeriodHandler,
   ) {}
 
-  @RequirePermission('period:open', { scope: 'organization' })
+  @RequirePermission('period:open')
   @Post()
   async open(
     @Body() dto: OpenPeriodDto,
@@ -33,7 +33,7 @@ export class FinancialPeriodController {
     );
   }
 
-  @RequirePermission('period:close', { scope: 'organization' })
+  @RequirePermission('period:close')
   @Post(':id/close')
   async close(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
     await this.closePeriod.execute(new ClosePeriodCommand(user.organizationId, id, user.id));
