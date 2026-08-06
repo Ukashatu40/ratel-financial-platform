@@ -32,6 +32,12 @@ const MATRIX: Array<{ role: string; permission: string; scope: string }> = [
 
   // Auditor
   { role: 'auditor', permission: 'audit:view', scope: 'organization' },
+
+  // Expense Viewing
+  { role: 'employee', permission: 'expense:view', scope: 'own' },
+  { role: 'department_head', permission: 'expense:view', scope: 'department' },
+  { role: 'accountant', permission: 'expense:view', scope: 'organization' },
+  { role: 'finance_director', permission: 'expense:view', scope: 'organization' },
 ];
 
 export async function seedRolePermissions(prisma: PrismaClient) {
