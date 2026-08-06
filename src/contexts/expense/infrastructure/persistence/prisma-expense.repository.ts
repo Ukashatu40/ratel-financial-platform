@@ -5,6 +5,8 @@ import { TransactionClient } from '../../../../shared-kernel/unit-of-work/unit-o
 import { Money } from '../../../../shared-kernel/money/money.vo';
 import { Expense, ExpenseProps } from '../../domain/aggregates/expense.aggregate';
 import { ExpenseRepository } from '../../domain/ports/expense-repository.port';
+import { Cursor, Page } from '../../../../shared-kernel/pagination/cursor';
+import { ExpenseListFilter } from '../../domain/ports/expense-repository.port';
 
 type ExpenseRow = {
   id: string;
@@ -42,6 +44,44 @@ export class PrismaExpenseRepository implements ExpenseRepository {
     // partitioning deferred above actually lands.
     const row = await client.expense.findFirst({ where: { id } });
     return row ? this.toDomain(row) : null;
+  }
+
+  async findMany(filter: ExpenseListFilter): Promise<Page<Expense>> {
+    const where: any = { organizationId: filter.organizationId };
+
+    if (filter.departmentIds?.length) where.departmentId = { in: filter.departmentIds };
+    if (filter.requesterId) where.sourceActorId = filter.requesterId;
+    if (filter.status?.length) where.status = { in: filter.status as any };
+
+    if (filter.cursor) {
+      // Cursor pagination on (createdAt, id) — standard tie-break pattern
+      // (Phase 7.1) for a non-unique-alone sort column.
+      where.OR = [
+        { createdAt: { lt: new Date(filter.cursor.createdAt) } },
+        { createdAt: new Date(filter.cursor.createdAt), id: { lt: filter.cursor.id } },
+      ];
+    }
+
+    const rows = await this.prisma.expense.findMany({
+      where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: filter.limit + 1, // fetch one extra to know if there's a next page
+    });
+
+    const hasMore = rows.length > filter.limit;
+    const pageRows = hasMore ? rows.slice(0, filter.limit) : rows;
+    const items = pageRows.map((row) => this.toDomain(row));
+
+    const nextCursor = hasMore
+      ? Buffer.from(
+          JSON.stringify({
+            createdAt: pageRows[pageRows.length - 1].createdAt.toISOString(),
+            id: pageRows[pageRows.length - 1].id,
+          }),
+        ).toString('base64url')
+      : null;
+
+    return { data: items, nextCursor };
   }
 
   async save(expense: Expense, tx: TransactionClient): Promise<void> {

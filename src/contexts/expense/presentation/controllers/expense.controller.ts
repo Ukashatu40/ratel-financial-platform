@@ -1,6 +1,5 @@
 // src/contexts/expense/presentation/controllers/expense.controller.ts
-// (replace entire file)
-import { Body, Controller, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Param, Post, UseGuards, Get, Query } from '@nestjs/common';
 import { CreateExpenseHandler } from '../../application/handlers/create-expense.handler';
 import { SubmitExpenseHandler } from '../../application/handlers/submit-expense.handler';
 import { ApproveExpenseHandler } from '../../application/handlers/approve-expense.handler';
@@ -22,6 +21,11 @@ import { PermissionGuard } from '../../../../auth/authorization/permission.guard
 import { RequirePermission } from '../../../../auth/authorization/permission.decorator';
 import { CurrentUser } from '../../../../auth/authentication/current-user.decorator';
 import { UserPrincipal } from '../../../../shared-kernel/auth/user-principal';
+import { GetExpenseByIdHandler } from '../../application/handlers/get-expense-by-id.handler';
+import { ListExpensesHandler } from '../../application/handlers/list-expenses.handler';
+import { GetExpenseByIdQuery } from '../../application/queries/get-expense-by-id.query';
+import { ListExpensesQuery } from '../../application/queries/list-expenses.query';
+import { ListExpensesDto } from '../dto/list-expenses.dto';
 
 @Controller({ path: 'expenses', version: '1' })
 @UseGuards(JwtAuthGuard, PermissionGuard)
@@ -33,6 +37,8 @@ export class ExpenseController {
     private readonly rejectExpense: RejectExpenseHandler,
     private readonly cancelExpense: CancelExpenseHandler,
     private readonly createAdjustment: CreateAdjustmentHandler,
+    private readonly getExpenseById: GetExpenseByIdHandler,
+    private readonly listExpenses: ListExpensesHandler,
   ) {}
 
   @RequirePermission('expense:create') // was: { scope: 'own' } — create has no resource yet
@@ -54,6 +60,20 @@ export class ExpenseController {
         dto.projectId,
         dto.description,
       ),
+    );
+  }
+
+  @RequirePermission('expense:view', { resourceType: 'expense' })
+  @Get(':id')
+  async getById(@Param('id') id: string, @CurrentUser() user: UserPrincipal) {
+    return this.getExpenseById.execute(new GetExpenseByIdQuery(id, user.organizationId));
+  }
+
+  @RequirePermission('expense:view')
+  @Get()
+  async list(@Query() dto: ListExpensesDto, @CurrentUser() user: UserPrincipal) {
+    return this.listExpenses.execute(
+      new ListExpensesQuery(user, dto.status, dto.cursor, dto.limit),
     );
   }
 

@@ -17,6 +17,8 @@ import { CancelExpenseHandler } from './application/handlers/cancel-expense.hand
 import { CreateAdjustmentHandler } from './application/handlers/create-adjustment.handler';
 import { ExpenseController } from './presentation/controllers/expense.controller';
 import { ExpenseScopeProvider } from './infrastructure/auth/expense-scope.provider';
+import { GetExpenseByIdHandler } from './application/handlers/get-expense-by-id.handler';
+import { ListExpensesHandler } from './application/handlers/list-expenses.handler';
 
 @Module({
   // FinancialPeriodModule imported to get PERIOD_STATUS_PORT (Phase 3.2's
@@ -37,6 +39,8 @@ import { ExpenseScopeProvider } from './infrastructure/auth/expense-scope.provid
     CancelExpenseHandler,
     CreateAdjustmentHandler,
     ExpenseScopeProvider,
+    GetExpenseByIdHandler,
+    ListExpensesHandler,
   ],
   exports: [
     CreateExpenseHandler,
@@ -45,6 +49,8 @@ import { ExpenseScopeProvider } from './infrastructure/auth/expense-scope.provid
     RejectExpenseHandler,
     CancelExpenseHandler,
     CreateAdjustmentHandler,
+    GetExpenseByIdHandler,
+    ListExpensesHandler,
   ],
 })
 export class ExpenseModule {}
