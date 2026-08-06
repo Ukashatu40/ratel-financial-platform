@@ -14,6 +14,8 @@ import { PermissionGuard } from './authorization/permission.guard';
 import { AuthController } from './presentation/controllers/auth.controller';
 import { USER_ROLE_SERVICE } from '../shared-kernel/auth/user-role.port';
 import { PrismaUserRoleService } from './authorization/prisma-user-role.service';
+import { EFFECTIVE_SCOPE_RESOLVER } from '../shared-kernel/auth/effective-scope-resolver.port';
+import { PrismaEffectiveScopeResolver } from './authorization/prisma-effective-scope.resolver';
 
 @Global()
 @Module({
@@ -36,7 +38,8 @@ import { PrismaUserRoleService } from './authorization/prisma-user-role.service'
     AuthService,
     RefreshTokenService,
     { provide: USER_ROLE_SERVICE, useClass: PrismaUserRoleService },
+    { provide: EFFECTIVE_SCOPE_RESOLVER, useClass: PrismaEffectiveScopeResolver },
   ],
-  exports: [JwtAuthGuard, PermissionGuard, USER_ROLE_SERVICE],
+  exports: [JwtAuthGuard, PermissionGuard, USER_ROLE_SERVICE, EFFECTIVE_SCOPE_RESOLVER],
 })
 export class AuthModule {}
