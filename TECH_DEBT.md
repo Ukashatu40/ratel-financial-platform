@@ -46,16 +46,11 @@ Both gaps closed:
   not yet covered by a dedicated test — worth adding before relying on it
   further (see new item below).
 
-### 3b. `PermissionGuard`'s resource-scope enforcement lacks dedicated test coverage
-**Where:** `src/auth/authorization/permission.guard.ts`
-**What:** The department/own-scope resolution logic added to close item #3
-has no unit or e2e test exercising it directly (e.g. a department_head from
-Department A attempting to approve an expense in Department B, expecting a
-403). The existing e2e suite only covers the self-approval case, not
-cross-department denial.
-**To close:** Add an e2e test creating two departments with two different
-department_head users, confirming cross-department approval is denied and
-same-department approval succeeds.
+### 3b. ~~`PermissionGuard`'s resource-scope enforcement lacks dedicated test coverage~~ — RESOLVED
+Added two e2e tests: a department_head from Department B is denied (403)
+approving an expense in Department A, and the same department's own head
+is allowed (201) — the positive-case control confirming the guard isn't
+just blocking everything indiscriminately.
 
 ### 4. `audit_log_entries` append-only DB grant not applied
 **Where:** Migration for `add_outbox_context_and_audit_log`, commented out.
@@ -201,25 +196,30 @@ control exactly why/when it fires there; `PrismaService` needs the same
 listener structure but with logging retained for every branch, never a
 fully silent case.
 
-### 20. No `GET` endpoints exist on `ExpenseController` or `PayrollRunController`
-**Where:** `src/contexts/expense/presentation/controllers/expense.controller.ts`,
-`src/contexts/payroll/presentation/controllers/payroll-run.controller.ts`
-**What:** Only mutating (`POST`) endpoints were ever built. There is no way
-for an API client to fetch a single expense/payroll run by ID, or list them
-with the filtering/pagination/sorting design from Phase 7.1–7.2. Discovered
-concretely while writing e2e tests: verifying an expense's status after
-`submit`/`approve` required querying the database directly via a test-only
-Prisma client, because the real API offers no way to check.
-**Why acceptable so far:** All testing to date (manual `curl`, unit,
-integration, e2e) has been able to work around this by checking DB state
-directly or trusting command handler return values — but this means the
-API is currently write-only from a real client's perspective, which isn't
-viable for an actual frontend or integration to consume.
-**To close:** Build `GET /:id` and `GET /` (cursor-paginated, per Phase 7.1)
-for both controllers, backed by dedicated query handlers — this is a
-genuinely missing application-layer piece (query side), not just a
-controller gap; no `GetExpenseByIdQuery`/`GetExpenseByIdHandler` exists yet
-either.
+### 20. ~~No `GET` endpoints exist on `ExpenseController` or `PayrollRunController`~~ — RESOLVED
+Built `GET /:id` and `GET /` (cursor-paginated) for both controllers.
+Expense's list endpoint scopes results via a new `EffectiveScopeResolver`
+(widest granted scope becomes a query filter — `own` filters by requester,
+`department` by department IDs, `organization` applies no filter). Payroll's
+endpoints need no equivalent scoping since every payroll permission is
+organization-scoped only. See new item #21 for a design choice made while
+building this that's worth flagging on its own.
+
+### 21. Payroll's GET :id response is shaped for a two-tier view split that isn't actually enforced
+**Where:** `GetPayrollRunByIdHandler`
+**What:** The handler's response deliberately omits the decrypted
+line-item breakdown (only returns `employeeId`/`grossPay`/`netPay` per
+payslip), with a comment implying this is a lighter "summary" view distinct
+from full sensitive detail. In reality, BOTH this summary and any future
+full-detail endpoint currently sit behind the exact same permission
+(`payroll:view_sensitive`) — there's no actual two-tier authorization here,
+just a response shape that looks like there might be one day.
+**To close:** Either commit to the two-tier design for real (a separate,
+more restrictive permission for full line-item detail vs. this summary), or
+simplify the response/comment to stop implying a distinction that isn't
+enforced. Low priority — not a security gap (the single permission gate is
+still correctly enforced), just a piece of code whose shape overstates its
+own behavior.
 
 ## Data Integrity
 
@@ -282,4 +282,4 @@ build and are NOT within `@nestjs/bullmq@11.0.4`'s declared peer range
 
 ---
 
-*Last updated: 2026-08-02, after the Audit subscriber piece (M3 follow-on).*
+*Last updated: 2026-08-06, after the Audit subscriber piece (M3 follow-on).*
