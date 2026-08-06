@@ -26,33 +26,36 @@ it after the fact.
 endpoint across all three controllers, backed by the real `role_permissions`
 table and seed data. See #3 below for what this guard does NOT yet enforce.
 
-### 3. `PermissionGuard` and `WorkflowEngine` don't verify resource-level scope
-**Where:** `src/auth/authorization/permission.guard.ts`,
-`src/shared-kernel/workflow/workflow-engine.ts`
-**What:** Two related, still-open gaps:
-- `PermissionGuard` checks that a user holds SOME role granting the required
-  permission, and that the request's implicit org matches the user's own —
-  but does NOT verify department-level match (e.g. a `department_head` can
-  currently approve expenses from ANY department, not just their own,
-  despite routes being annotated `{ scope: 'department' }`). That scope
-  argument currently documents intent without being enforced.
-- `WorkflowEngine.recordApproval()` checks self-approval (separation of
-  duties) but does NOT verify the approver's role actually matches the
-  current `ApprovalStep.requiredRole` — e.g. an `employee` role, if it
-  somehow ended up calling `expense:approve` successfully, would still pass
-  `WorkflowEngine`'s own check.
-**Why acceptable so far:** No endpoint currently allows a user to act
-outside their assigned department in a way that's been tested; the gap is
-real but narrower in practice than it sounds, since seed data assigns each
-test user exactly one relevant role.
-**To close:** `PermissionGuard` needs each route to supply a resource-loader
-(fetch the target expense/payroll run, compare its `departmentId`/org
-against the user's assignment) before allowing the request through.
-`WorkflowEngine` needs a `UserRoleService` port to check the approver's role
-against `ApprovalStep.requiredRole` directly. Both are real, scoped pieces
-of work — not a rewrite — deferred here to keep the auth module's initial
-build focused on getting the mechanics (JWT, permission matrix, guard
-skeleton) correct first.
+### 3. ~~`PermissionGuard` and `WorkflowEngine` don't verify resource-level scope~~ — RESOLVED
+Both gaps closed:
+- `PermissionGuard` now reads the ACTUAL granted scope from `role_permissions`
+  (not a decorator argument that could drift from what's seeded) and, for
+  `own`/`department` grants, resolves the target resource via a
+  `ResourceScopeRegistry` (self-registration pattern, mirroring
+  `AuditSubscriber`) to check requester/department match. The
+  `@RequirePermission` decorator's `scope` argument was removed entirely —
+  it was never enforced, and keeping a decorative parameter that looked
+  load-bearing was worse than not having it.
+- `WorkflowEngine.recordApproval()` is now async and verifies the approver
+  actually holds `ApprovalStep.requiredRole` (and matching department, for
+  department-scoped steps) via a new `UserRoleService` port, before
+  delegating to `ApprovalProgress`.
+- Regression-tested: `WorkflowEngine`'s role verification has 4 new unit
+  tests (wrong role, right role/wrong department, right role/right
+  department, org-scope skip). `PermissionGuard`'s resource-scope path is
+  not yet covered by a dedicated test — worth adding before relying on it
+  further (see new item below).
+
+### 3b. `PermissionGuard`'s resource-scope enforcement lacks dedicated test coverage
+**Where:** `src/auth/authorization/permission.guard.ts`
+**What:** The department/own-scope resolution logic added to close item #3
+has no unit or e2e test exercising it directly (e.g. a department_head from
+Department A attempting to approve an expense in Department B, expecting a
+403). The existing e2e suite only covers the self-approval case, not
+cross-department denial.
+**To close:** Add an e2e test creating two departments with two different
+department_head users, confirming cross-department approval is denied and
+same-department approval succeeds.
 
 ### 4. `audit_log_entries` append-only DB grant not applied
 **Where:** Migration for `add_outbox_context_and_audit_log`, commented out.
