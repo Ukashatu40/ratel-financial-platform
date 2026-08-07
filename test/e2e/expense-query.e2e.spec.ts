@@ -212,14 +212,16 @@ describe('Expense query endpoints (e2e)', () => {
     expect(page2.body.data[0].id).not.toBe(page1.body.data[0].id); // genuinely a different record, not the same page repeated
   });
 
-  it('GET /:id on a nonexistent ID returns 404', async () => {
+  it('GET /:id on a nonexistent ID returns 404 with the SAME error shape as an org-mismatch 404', async () => {
     const res = await request(server)
       .get('/api/v1/expenses/00000000-0000-4000-8000-000000000099')
       .set('Authorization', `Bearer ${employee1Token}`)
       .expect(404);
 
-    expect(res.body.type).toContain('http-error');
+    expect(res.body.type).toContain('not-found'); // now genuinely true, not just status-matched
     expect(res.body.status).toBe(404);
-    expect(res.body.detail).toBe('Resource not found');
+    expect(res.body.detail).toBe(
+      'expense with id 00000000-0000-4000-8000-000000000099 was not found',
+    );
   });
 });

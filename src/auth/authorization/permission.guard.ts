@@ -1,11 +1,6 @@
 // src/auth/authorization/permission.guard.ts
-import {
-  CanActivate,
-  ExecutionContext,
-  ForbiddenException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from '@nestjs/common';
+import { EntityNotFoundError } from '../../shared-kernel/errors/domain-error';
 import { Reflector } from '@nestjs/core';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PERMISSION_KEY, PermissionRequirement } from './permission.decorator';
@@ -57,13 +52,13 @@ export class PermissionGuard implements CanActivate {
 
     const scopeInfo = await this.scopeRegistry.resolve(requirement.resourceType, resourceId);
     if (!scopeInfo) {
-      // 404, not 403 — the resource genuinely doesn't exist, so there's
-      // nothing to be "forbidden" from. Using 403 here would have leaked
-      // information in the wrong direction: it implies "this exists but
-      // you can't see it," which is worse than just saying "not found,"
-      // the same way EntityNotFoundError already behaves for org-mismatch
-      // cases elsewhere in the codebase.
-      throw new NotFoundException(`Resource not found`);
+      // Reusing the SAME DomainError subclass GetExpenseByIdHandler throws
+      // for the org-mismatch case — this is what actually makes the two
+      // code paths (guard-level "doesn't exist" vs handler-level "wrong
+      // org") produce IDENTICAL type/detail shapes, not just matching
+      // status codes. requirement.resourceType ('expense', 'payrollRun')
+      // doubles as the entityType here, which is why this reuses cleanly.
+      throw new EntityNotFoundError(requirement.resourceType, resourceId);
     }
 
     const hasOwnGrant = grants.some((g) => g.scope === 'own');
