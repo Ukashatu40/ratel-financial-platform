@@ -12,7 +12,10 @@ import { JobsModule } from './jobs/jobs.module';
 import { FinancialPeriodModule } from './contexts/financial-period/financial-period.module';
 import { ExpenseModule } from './contexts/expense/expense.module';
 import { PayrollModule } from './contexts/payroll/payroll.module';
+import { AuthModule } from './auth/auth.module';
 import { AppController } from './app.controller';
+import { ReportingModule } from './reporting/reporting.module';
+import { IntegrationModule } from './integration/integration.module';
 
 /**
  * Import order matters for readability, not execution — ConfigModule and
@@ -31,10 +34,13 @@ import { AppController } from './app.controller';
     WorkflowModule,
     EncryptionModule,
     AuditModule,
+    AuthModule,
     JobsModule, // <-- add, after Encryption/SharedKernel since it depends on both
     FinancialPeriodModule,
     ExpenseModule,
     PayrollModule,
+    ReportingModule,
+    IntegrationModule,
   ],
   controllers: [AppController],
 })

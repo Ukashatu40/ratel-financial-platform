@@ -7,12 +7,15 @@ import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
 import { ProblemDetailsFilter } from './shared-kernel/errors/problem-details.filter';
 import { EnvConfig } from './config/env.schema';
+import multipart from '@fastify/multipart';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
     new FastifyAdapter({ logger: false }), // structured logging (Phase 4.4/Phase 9) wired properly in the observability pass — Fastify's default logger is off to avoid double-logging in the meantime
   );
+
+  await app.register(multipart as any);
 
   const config = app.get(ConfigService<EnvConfig>);
 
