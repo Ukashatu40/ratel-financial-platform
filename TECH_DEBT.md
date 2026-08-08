@@ -97,17 +97,44 @@ reactively later.
 
 ## Audit Trail
 
-### 7. Hash chain read-then-write is not atomic
-**Where:** `AuditLogService.record()`
-**What:** Reads the last entry's hash, then inserts a new row, as two
-separate statements. Under concurrent writers, two entries could read the
-same `prevHash` and race, corrupting the chain's integrity.
-**Why acceptable so far:** The outbox dispatcher currently runs as a single
-instance processing events sequentially (one at a time, in a loop) — no
-concurrent writers exist yet.
-**To close:** Either wrap the read+insert in a Postgres advisory lock, or
-move hash computation into a DB trigger (as Phase 6.2 originally specified).
-Must be fixed before running more than one dispatcher instance.
+### 7. ~~Hash chain read-then-write is not atomic~~ — RESOLVED
+Fixed via a Postgres advisory lock (`pg_advisory_xact_lock`, transaction-scoped
+— auto-releases at commit/rollback) wrapping the read-then-insert inside
+`AuditLogService.record()`, serializing every concurrent writer globally.
+`AuditLogService` now goes through `UnitOfWork` instead of holding a direct
+`PrismaService` reference, consistent with the rest of the codebase's
+transaction pattern.
+
+Verified with a real integration test (not just unit-tested, since a fake
+transaction client can't prove anything about actual Postgres-level
+serialization): 20 genuinely concurrent `record()` calls via `Promise.all`
+produce an unbroken chain — every entry's `prevHash` matches the previous
+entry's `entryHash` exactly, and all 20 `entryHash` values are unique. This
+is the scenario that would have reliably corrupted the chain before the fix.
+
+### 7b. Audit chain is a single global sequence across all organizations, not per-organization
+**Where:** `AuditLogService.record()` — the `findFirst({ orderBy: {
+createdAt: 'desc' } })` query has no `organizationId` filter, so it walks
+the LATEST entry across every organization, not the latest entry for the
+specific org being audited.
+**What:** Discovered while fixing #7, deliberately NOT changed as part of
+that fix since it's a different concern (chain scope, not atomicity) —
+changing it would be a bigger design decision than what #7 asked for.
+Today, with only one organization (Ratel-Plus) existing, this is invisible.
+The moment a second organization exists, every organization's audit entries
+interleave into ONE shared chain — which means proving chain integrity to
+one organization's auditor would necessarily expose that other
+organizations' events participated in the same sequence, a real disclosure
+concern, not just a cosmetic one.
+**To close:** Decide deliberately whether the chain should be scoped
+per-organization (separate `prevHash` lineage per `organizationId`, likely
+the right call once multi-tenancy is real) or intentionally kept global
+(defensible only if a documented reason exists, e.g. a single shared
+compliance boundary). Whichever is chosen, the advisory lock key from #7's
+fix would need to become per-organization too
+(`hashtext('audit_log_chain:' || organizationId)`) rather than the current
+single global key, to avoid serializing unrelated organizations' writes
+against each other unnecessarily.
 
 ### 8. No field-level old/new value diffing
 **Where:** `AuditSubscriber`
@@ -324,4 +351,4 @@ concern of blindly trusting client-declared file type.
 
 ---
 
-*Last updated: 2026-08-07, after the Integration Layer (CSV import) piece.*
+*Last updated: 2026-08-08, after the Integration Layer (CSV import) piece.*
