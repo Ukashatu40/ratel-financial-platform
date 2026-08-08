@@ -24,3 +24,7 @@ process.env.JWT_REFRESH_SECRET = 'e2e-test-refresh-secret-at-least-32-characters
 process.env.JWT_ACCESS_TTL = '15m';
 process.env.JWT_REFRESH_TTL_DAYS = '7';
 process.env.FIELD_ENCRYPTION_MASTER_KEY = Buffer.alloc(32, 1).toString('base64'); // fixed, deterministic test key
+process.env.OBJECT_STORAGE_ENDPOINT = state.minioEndpoint;
+process.env.OBJECT_STORAGE_BUCKET = 'e2e-test-attachments';
+process.env.OBJECT_STORAGE_ACCESS_KEY = state.minioAccessKey;
+process.env.OBJECT_STORAGE_SECRET_KEY = state.minioSecretKey;

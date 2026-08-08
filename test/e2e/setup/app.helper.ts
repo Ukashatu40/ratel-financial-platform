@@ -4,6 +4,7 @@ import { NestFastifyApplication, FastifyAdapter } from '@nestjs/platform-fastify
 import { ValidationPipe, VersioningType } from '@nestjs/common';
 import { AppModule } from '../../../src/app.module';
 import { ProblemDetailsFilter } from '../../../src/shared-kernel/errors/problem-details.filter';
+import multipart from '@fastify/multipart';
 
 /**
  * Mirrors main.ts's bootstrap exactly (global filter, validation pipe,
@@ -16,6 +17,8 @@ export async function createTestApp(): Promise<NestFastifyApplication> {
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
 
   const app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
+
+  await app.register(multipart as any); // <-- was missing; must mirror main.ts's bootstrap() exactly
 
   app.useGlobalFilters(new ProblemDetailsFilter());
   app.useGlobalPipes(
