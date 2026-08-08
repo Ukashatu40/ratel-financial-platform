@@ -29,6 +29,7 @@
   "type": "commonjs",
   "dependencies": {
     "@eslint/js": "^10.0.1",
+    "@fastify/multipart": "^10.1.0",
     "@nestjs/bullmq": "^11.0.4",
     "@nestjs/common": "^11.1.28",
     "@nestjs/config": "^4.0.4",
@@ -48,6 +49,7 @@
     "fastify": "^5.10.0",
     "ioredis": "^5.11.1",
     "nestjs-pino": "^4.6.1",
+    "papaparse": "^5.5.4",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
     "pg": "^8.22.0",
@@ -67,6 +69,7 @@
     "@types/jest": "^30.0.0",
     "@types/ms": "^2.1.0",
     "@types/node": "^26.1.2",
+    "@types/papaparse": "^5.5.2",
     "@types/passport-jwt": "^4.0.1",
     "@types/pg": "^8.20.0",
     "@types/supertest": "^7.2.1",
