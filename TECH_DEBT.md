@@ -280,6 +280,48 @@ build and are NOT within `@nestjs/bullmq@11.0.4`'s declared peer range
 (`bullmq: ^3.0.0 || ^4.0.0 || ^5.0.0`). Revisit both majors together once
 `@nestjs/bullmq` publishes support.
 
+## Integration Layer
+
+### 22. CSV import uses a fixed column schema, not configurable mapping
+**Where:** `src/integration/adapters/csv/csv-provider.adapter.ts`
+**What:** Phase 8.2 originally envisioned user-configurable header mapping
+(real-world spreadsheets vary in column names/order). v1 requires an exact
+fixed header set (`department,category,vendor,amountMinorUnits,currency,
+expenseDate,description`) — anything else fails the whole file at parse
+time with a clear error, but there's no mapping UI/config to adapt to a
+different layout.
+**To close:** Build a `ColumnMapping` concept (per-upload, stored config
+mapping arbitrary source headers to the canonical fields) — genuinely
+separate, larger scope from what this piece built.
+
+### 23. Import CSV content is stored in the database, not object storage
+**Where:** `ImportJob.rawContent` (Postgres `TEXT` column)
+**What:** The original blueprint specified Object Storage (S3-compatible)
+for receipts/invoices/imports (Phase "File Storage" section) — that module
+was never built. Storing raw CSV text directly in Postgres works for
+small files but doesn't scale to large imports and bypasses the
+virus-scanning/retention design from Phase 9.7.
+**To close:** Build the Object Storage module, switch `ImportJob` to store
+a storage key/reference instead of raw content.
+
+### 24. File upload has no dedicated 400 for "no file provided"
+**Where:** `ImportController.create()`
+**What:** Throws a generic `Error('No file uploaded')`, which
+`ProblemDetailsFilter` catches as a `500 Internal Server Error` since it's
+not a `DomainError` or `HttpException` subclass — genuinely a client
+mistake (missing multipart field), should be a `400`.
+**To close:** Throw a proper `BadRequestException` or a new
+`DomainError` subclass instead.
+
+### 25. No file-type/content validation on CSV upload
+**Where:** `ImportController.create()`
+**What:** Accepts any uploaded file as if it were CSV — no MIME-type check,
+no content-sniffing (Phase 9.7's "secure file uploads" guidance). A
+non-CSV file just fails at parse time with a generic error, which is safe
+but not a great experience, and doesn't address the security-adjacent
+concern of blindly trusting client-declared file type.
+**To close:** Add content-sniffing validation before attempting to parse.
+
 ---
 
-*Last updated: 2026-08-06, after the Audit subscriber piece (M3 follow-on).*
+*Last updated: 2026-08-07, after the Integration Layer (CSV import) piece.*
