@@ -418,4 +418,37 @@ source before it becomes a CI timeout problem as the suite grows further.
 
 ---
 
-*Last updated: 2026-08-09, after fixing the file-upload error-status gap (item #24) surfaced during Object Storage e2e testing.*
+## Observability
+
+### 29. Prisma health-check error message is occasionally empty in a narrow reconnection race
+**Where:** `PrismaHealthIndicator.isHealthy()`
+**What:** During live testing (stopping/starting the Postgres container
+repeatedly), most failure states surfaced a genuinely useful message via
+`collectErrorChainMessages()` (e.g. "Server has closed the connection").
+But in the specific window right after `PrismaService`'s own pool-level
+`error` listener already caught and logged a connection termination, a
+subsequent health-check query sometimes throws a Prisma error with an
+empty `.message` and no `.cause` to fall back to — nothing left to extract
+at the JS level. Confirmed this is a genuine Prisma/`@prisma/adapter-pg`
+limitation in that race window, not a bug in the chain-walking logic
+itself (which worked correctly for every other failure state tested).
+**Why acceptable:** The functionally important behavior — `status`
+correctly toggling `"error"`/`"ok"` in lockstep with real DB availability
+— held reliably across every test, including the cases with a thin
+message. A readiness check's job is to accurately signal "can/can't serve
+traffic," which it does; the message is a diagnostic nicety on top, not
+the core contract. `PrismaHealthIndicator` also unconditionally logs the
+full error server-side regardless of what the HTTP response manages to
+extract, so an engineer investigating a real incident still has complete
+information via logs even when the HTTP message is thin.
+**To close:** Not planned — this is deep in Prisma 7's driver-adapter
+internals (undocumented, version-specific), and chasing it further has
+poor ROI relative to the safety net already in place (server-side logging)
+for a cosmetic gap in an edge case. Revisit only if Prisma's error-wrapping
+behavior changes in a future version, or if the thin message actually
+becomes an operational problem in practice (unlikely, given logs already
+carry full detail).
+
+---
+
+*Last updated: 2026-08-09, after the Observability piece.*
