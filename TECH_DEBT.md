@@ -331,14 +331,15 @@ virus-scanning/retention design from Phase 9.7.
 **To close:** Build the Object Storage module, switch `ImportJob` to store
 a storage key/reference instead of raw content.
 
-### 24. File upload has no dedicated 400 for "no file provided"
-**Where:** `ImportController.create()`
-**What:** Throws a generic `Error('No file uploaded')`, which
-`ProblemDetailsFilter` catches as a `500 Internal Server Error` since it's
-not a `DomainError` or `HttpException` subclass — genuinely a client
-mistake (missing multipart field), should be a `400`.
-**To close:** Throw a proper `BadRequestException` or a new
-`DomainError` subclass instead.
+### 24. ~~File upload has no dedicated 400 for "no file provided"~~ — RESOLVED
+Fixed in both `ImportController.create()` and `ExpenseController.attach()`
+(`throw new Error(...)` → `throw new BadRequestException(...)`). Also
+caught and fixed the same underlying bug class in `AttachFileHandler`:
+`UnsupportedFileTypeError` and `FileTooLargeError` were plain `Error`
+subclasses, invisible to `ProblemDetailsFilter`, so they surfaced as 500s
+too — converted both to `DomainError` subclasses (400) alongside this fix,
+since it's the identical root cause. Verified via e2e: unsupported file
+type now returns 400, not 500.
 
 ### 25. No file-type/content validation on CSV upload
 **Where:** `ImportController.create()`
@@ -351,4 +352,70 @@ concern of blindly trusting client-declared file type.
 
 ---
 
-*Last updated: 2026-08-08, after the Integration Layer (CSV import) piece.*
+## Object Storage
+
+### 26. No real virus scanning — attachments default to "unscanned," not actually checked
+**Where:** `AttachFileHandler`, `Attachment.scanStatus`
+**What:** Phase 9.7 specified secure file uploads with virus scanning
+(ClamAV or a hosted scanning service) before a file becomes visible/
+downloadable. This build persists every upload with `scanStatus: 'unscanned'`
+and does NOT run any actual scan, nor does anything gate download access
+on scan status — an infected file uploaded today would be immediately
+downloadable by anyone with view access to the expense.
+**Why acceptable so far:** No scanning integration exists anywhere in this
+codebase; being honest about that via an explicit `unscanned` status
+(rather than a misleading `clean` default) was the deliberate choice made
+when this schema was designed — better to visibly under-deliver than to
+silently claim a security control that doesn't exist.
+**To close:** Integrate ClamAV (or a hosted equivalent) as an async
+post-upload step (a BullMQ job, matching the pattern already used for
+outbox dispatch and CSV import), transitioning `scanStatus` from
+`unscanned` to `clean`/`infected`, and gate the download-URL endpoint to
+refuse `infected` files.
+
+### 27. `S3ObjectStorageAdapter` lazily validates config — silent gap in test coverage, not just prod
+**Where:** `S3ObjectStorageAdapter.getClient()`
+**What:** Object storage config (`OBJECT_STORAGE_*`) is validated only on
+first actual use, not at app boot, specifically so the app (and existing
+e2e suites that don't touch attachments) keep working without a MinIO
+container. This means: (a) a genuinely missing/misconfigured production
+config wouldn't be caught until the first real upload attempt, not at
+deploy time, and (b) this whole piece has ZERO integration or e2e test
+coverage against a real MinIO container — consistent with several other
+pieces in this build (Reporting, CSV import) that were verified manually
+via `curl` first, with automated coverage as a deliberate follow-up
+decision, not an oversight.
+**To close:** Add a MinIO Testcontainers module to the integration/e2e
+harnesses (same pattern as Postgres/Redis), and add a startup health-check
+(not necessarily `validateEnv`'s hard-fail, since object storage isn't
+needed for every deployment) that at least logs a warning if
+`OBJECT_STORAGE_*` is unset.
+
+### 23. ~~Import CSV content is stored in the database, not object storage~~ — INFRASTRUCTURE NOW EXISTS, NOT YET WIRED
+The Object Storage module (this piece) now exists and could store CSV
+import content instead of the current `ImportJob.rawContent TEXT` column
+— but `ImportJobProcessor`/`ImportController` haven't been updated to use
+it yet. Marking this "infrastructure ready" rather than fully resolved,
+since the actual switch-over is a small remaining piece of work, not a
+blocked one.
+
+---
+
+## Testing Infrastructure
+
+### 28. Unit test suite logs a Jest "worker failed to exit gracefully" warning
+**Where:** `npm test` (unit suite only — integration/e2e legitimately hold
+real DB/Redis handles, so a similar warning there wouldn't be surprising;
+this is specifically the unit run, which should have zero real I/O).
+**What:** `"A worker process has failed to exit gracefully and has been
+force exited... Active timers can also cause this."` appears after all 146
+unit tests pass. Not investigated — every test passes and nothing is
+functionally broken, but a genuine leak in a suite with no I/O is worth
+understanding eventually (likely candidates: an un-`.unref()`'d timer
+somewhere, or a native binding like `argon2` holding a handle open).
+**To close:** Run `npm test -- --detectOpenHandles` and trace the actual
+source before it becomes a CI timeout problem as the suite grows further.
+
+---
+
+*Last updated: 2026-08-09, after fixing the file-upload error-status gap (item #24) surfaced during Object Storage e2e testing.*
