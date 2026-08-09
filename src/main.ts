@@ -9,6 +9,7 @@ import { AppModule } from './app.module';
 import { ProblemDetailsFilter } from './shared-kernel/errors/problem-details.filter';
 import { EnvConfig } from './config/env.schema';
 import multipart from '@fastify/multipart';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestFastifyApplication>(
@@ -36,6 +37,26 @@ async function bootstrap(): Promise<void> {
   // URI versioning per Phase 4.4 decision — /api/v1/...
   app.setGlobalPrefix('api');
   app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
+
+  if (config.get('NODE_ENV', { infer: true }) !== 'production') {
+    const swaggerConfig = new DocumentBuilder()
+      .setTitle('Ratel Financial Platform API')
+      .setDescription(
+        'Expense management, payroll, financial periods, reporting, and integration API for Ratel-Plus Nigeria Ltd.',
+      )
+      .setVersion('1.0')
+      .addBearerAuth(
+        { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },
+        'access-token', // reference name used by @ApiBearerAuth('access-token') below
+      )
+      .build();
+
+    const document = SwaggerModule.createDocument(app, swaggerConfig);
+    SwaggerModule.setup('api/docs', app, document);
+
+    // eslint-disable-next-line no-console
+    console.log('[swagger] API docs available at /api/docs (non-production only)');
+  }
 
   const port = config.get('PORT', { infer: true }) ?? 3000;
   await app.listen(port, '0.0.0.0');
