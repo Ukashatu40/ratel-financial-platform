@@ -1,12 +1,14 @@
 // src/observability/health/redis-health.indicator.ts
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { HealthIndicatorService } from '@nestjs/terminus';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
 import { EnvConfig } from '../../config/env.schema';
+import { collectErrorChainMessages } from '../../shared-kernel/errors/error-chain.util';
 
 @Injectable()
 export class RedisHealthIndicator {
+  private readonly logger = new Logger(RedisHealthIndicator.name);
   private client: Redis | null = null;
 
   constructor(
@@ -41,10 +43,10 @@ export class RedisHealthIndicator {
       await this.getClient().ping();
       return indicator.up();
     } catch (err) {
-      const error = err as Error & { cause?: unknown };
-      const causeMessage = error.cause instanceof Error ? error.cause.message : undefined;
-      const message =
-        [error.message?.trim(), causeMessage].filter(Boolean).join(' — ') || 'Unknown Redis error';
+      this.logger.error('Redis health check failed', err instanceof Error ? err.stack : err);
+
+      const chainMessages = collectErrorChainMessages(err);
+      const message = chainMessages.length > 0 ? chainMessages.join(' — ') : 'Unknown Redis error';
 
       return indicator.down({ message });
     }
