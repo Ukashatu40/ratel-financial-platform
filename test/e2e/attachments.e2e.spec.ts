@@ -122,7 +122,7 @@ describe('Attachments (e2e)', () => {
     expect(Buffer.from(downloadRes.body).equals(MINIMAL_VALID_PDF)).toBe(true);
   });
 
-  it('rejects an unsupported file type', async () => {
+  it('rejects an unsupported file type with 400, not 500', async () => {
     await request(server)
       .post(`/api/v1/expenses/${expenseId}/attachments`)
       .set('Authorization', `Bearer ${employeeToken}`)
@@ -130,7 +130,7 @@ describe('Attachments (e2e)', () => {
         filename: 'virus.exe',
         contentType: 'application/x-msdownload',
       })
-      .expect(500); // known gap (TECH_DEBT #24-adjacent) — this SHOULD be 400, tracked, not silently accepted as correct
+      .expect(400); // was: 500, tracked as a known gap — now genuinely fixed
   });
 
   it("denies a different employee from viewing attachments on someone else's expense (own-scope enforcement)", async () => {
