@@ -21,10 +21,47 @@ export class ProblemDetailsFilter implements ExceptionFilter {
   private readonly logger = new Logger(ProblemDetailsFilter.name);
   private static readonly BASE_URL = 'https://api.ratel-plus.com/errors';
 
+  /**
+   * Terminus's HealthCheckService throws HttpException with a response body
+   * shaped like {status, info, error, details} — NOT the {message: [...]}
+   * shape validation errors use. Health-check payloads have their own
+   * well-established convention (consumed by orchestrators, monitoring
+   * dashboards, anything Terminus-aware) that's more useful diagnostically
+   * than RFC 7807 would be here — flattening it into `detail` string would
+   * destroy exactly the "which dependency failed" information a readiness
+   * endpoint exists to surface.
+   */
+  private isTerminusHealthResult(response: unknown): response is {
+    status: string;
+    info: unknown;
+    error: unknown;
+    details: unknown;
+  } {
+    return (
+      typeof response === 'object' &&
+      response !== null &&
+      'status' in response &&
+      'info' in response &&
+      'error' in response &&
+      'details' in response
+    );
+  }
+
   catch(exception: unknown, host: ArgumentsHost): void {
     const ctx = host.switchToHttp();
     const response = ctx.getResponse<FastifyReply>();
     const request = ctx.getRequest<FastifyRequest>();
+
+    if (exception instanceof HttpException) {
+      const body = exception.getResponse();
+      if (this.isTerminusHealthResult(body)) {
+        // Send Terminus's own shape untouched, at its own status code —
+        // bypass the RFC 7807 transformation entirely for this one case.
+        response.status(exception.getStatus()).send(body);
+        return;
+      }
+    }
+
     const correlationId = (request.headers['x-correlation-id'] as string) ?? undefined;
 
     const problem = this.toProblemDetails(exception, request.url, correlationId);
