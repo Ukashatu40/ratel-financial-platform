@@ -43,7 +43,10 @@ import { AttachFileCommand } from '../../application/commands/attach-file.comman
 import { GetAttachmentDownloadUrlQuery } from '../../application/queries/get-attachment-download-url.query';
 import { ListAttachmentsQuery } from '../../application/queries/list-attachments.query';
 import { FastifyRequest } from 'fastify';
+import { ApiBearerAuth, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 
+@ApiTags('Expenses')
+@ApiBearerAuth('access-token')
 @Controller({ path: 'expenses', version: '1' })
 @UseGuards(JwtAuthGuard, PermissionGuard)
 export class ExpenseController {
@@ -61,6 +64,7 @@ export class ExpenseController {
     private readonly listAttachments: ListAttachmentsHandler,
   ) {}
 
+  @ApiOperation({ summary: 'Create a draft expense' })
   @RequirePermission('expense:create') // was: { scope: 'own' } — create has no resource yet
   @Post()
   async create(
@@ -83,12 +87,16 @@ export class ExpenseController {
     );
   }
 
+  @ApiOperation({ summary: 'Get a single expense by ID' })
   @RequirePermission('expense:view', { resourceType: 'expense' })
   @Get(':id')
   async getById(@Param('id') id: string, @CurrentUser() user: UserPrincipal) {
     return this.getExpenseById.execute(new GetExpenseByIdQuery(id, user.organizationId));
   }
 
+  @ApiOperation({
+    summary: "List expenses, scoped to the caller's permission level (own/department/organization)",
+  })
   @RequirePermission('expense:view')
   @Get()
   async list(@Query() dto: ListExpensesDto, @CurrentUser() user: UserPrincipal) {
@@ -97,18 +105,23 @@ export class ExpenseController {
     );
   }
 
+  @ApiOperation({ summary: 'Submit a draft expense for approval' })
   @RequirePermission('expense:create', { resourceType: 'expense' }) // now checks: is this YOUR draft, if you're 'own'-scoped
   @Post(':id/submit')
   async submit(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
     await this.submitExpense.execute(new SubmitExpenseCommand(id, user.organizationId));
   }
 
+  @ApiOperation({
+    summary: 'Approve a pending expense (verifies approver role + department match)',
+  })
   @RequirePermission('expense:approve', { resourceType: 'expense' }) // now checks: is this YOUR department, if you're 'department'-scoped
   @Post(':id/approve')
   async approve(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
     await this.approveExpense.execute(new ApproveExpenseCommand(id, user.organizationId, user.id));
   }
 
+  @ApiOperation({ summary: 'Reject a pending expense with a reason' })
   @RequirePermission('expense:approve', { resourceType: 'expense' })
   @Post(':id/reject')
   async reject(
@@ -121,12 +134,14 @@ export class ExpenseController {
     );
   }
 
+  @ApiOperation({ summary: 'Cancel a draft or pending expense' })
   @RequirePermission('expense:create', { resourceType: 'expense' })
   @Post(':id/cancel')
   async cancel(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
     await this.cancelExpense.execute(new CancelExpenseCommand(id, user.organizationId, user.id));
   }
 
+  @ApiOperation({ summary: 'Create a GL-style reversal adjustment for a prior expense' })
   @RequirePermission('expense:adjust', { resourceType: 'expense' })
   @Post(':id/adjustments')
   async adjust(
@@ -145,6 +160,8 @@ export class ExpenseController {
   // Reuses 'expense:create' + resourceType: 'expense' — same permission
   // gate as submit/cancel, since attaching a receipt is naturally part of
   // the same "own this draft" capability, not a separate grant.
+  @ApiOperation({ summary: 'Upload a receipt/invoice attachment (PDF, JPEG, or PNG, max 10MB)' })
+  @ApiConsumes('multipart/form-data')
   @RequirePermission('expense:create', { resourceType: 'expense' })
   @Post(':id/attachments')
   async attach(
@@ -161,12 +178,14 @@ export class ExpenseController {
     );
   }
 
+  @ApiOperation({ summary: 'List attachments on an expense' })
   @RequirePermission('expense:view', { resourceType: 'expense' })
   @Get(':id/attachments')
   async listAttachmentsForExpense(@Param('id') id: string, @CurrentUser() user: UserPrincipal) {
     return this.listAttachments.execute(new ListAttachmentsQuery(id, user.organizationId));
   }
 
+  @ApiOperation({ summary: 'Get a time-limited presigned download URL for an attachment' })
   @RequirePermission('expense:view', { resourceType: 'expense' })
   @Get(':id/attachments/:attachmentId/download-url')
   async getAttachmentUrl(

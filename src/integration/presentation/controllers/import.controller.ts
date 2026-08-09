@@ -11,9 +11,12 @@ import { RequirePermission } from '../../../auth/authorization/permission.decora
 import { CurrentUser } from '../../../auth/authentication/current-user.decorator';
 import { UserPrincipal } from '../../../shared-kernel/auth/user-principal';
 import { IMPORT_JOB_NAME, IMPORT_JOB_QUEUE } from '../../../jobs/queues/import-job.queue';
+import { ApiBearerAuth, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 
 const MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024; // 5MB — generous for CSV, deliberately capped
 
+@ApiTags('Integration — CSV Import')
+@ApiBearerAuth('access-token')
 @Controller({ path: 'imports', version: '1' })
 @UseGuards(JwtAuthGuard, PermissionGuard)
 export class ImportController {
@@ -22,6 +25,11 @@ export class ImportController {
     @InjectQueue(IMPORT_JOB_QUEUE) private readonly queue: Queue,
   ) {}
 
+  @ApiOperation({
+    summary:
+      'Upload a CSV file for async bulk expense import (columns: department,category,vendor,amountMinorUnits,currency,expenseDate,description)',
+  })
+  @ApiConsumes('multipart/form-data')
   @RequirePermission('expense:create') // importing IS creating expenses in bulk — reuses the same permission, no new grant needed
   @Post()
   async create(
@@ -49,6 +57,7 @@ export class ImportController {
     return { importJobId: importJob.id };
   }
 
+  @ApiOperation({ summary: 'Check the status/progress of an import job' })
   @RequirePermission('expense:create')
   @Get(':jobId')
   async getStatus(@Param('jobId') jobId: string, @CurrentUser() user: UserPrincipal) {
@@ -68,6 +77,7 @@ export class ImportController {
     };
   }
 
+  @ApiOperation({ summary: 'List row-level failures for an import job' })
   @RequirePermission('expense:create')
   @Get(':jobId/errors')
   async getErrors(@Param('jobId') jobId: string, @CurrentUser() user: UserPrincipal) {

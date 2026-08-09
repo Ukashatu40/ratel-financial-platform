@@ -12,7 +12,10 @@ import { PermissionGuard } from '../../../../auth/authorization/permission.guard
 import { RequirePermission } from '../../../../auth/authorization/permission.decorator';
 import { CurrentUser } from '../../../../auth/authentication/current-user.decorator';
 import { UserPrincipal } from '../../../../shared-kernel/auth/user-principal';
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 
+@ApiTags('Financial Periods')
+@ApiBearerAuth('access-token')
 @Controller({ path: 'financial-periods', version: '1' })
 @UseGuards(JwtAuthGuard, PermissionGuard)
 export class FinancialPeriodController {

@@ -29,9 +29,12 @@ import { ListPayrollRunsHandler } from '../../application/handlers/list-payroll-
 import { GetPayrollRunByIdQuery } from '../../application/queries/get-payroll-run-by-id.query';
 import { ListPayrollRunsQuery } from '../../application/queries/list-payroll-runs.query';
 import { ListPayrollRunsDto } from '../dto/list-payroll-runs.dto';
+import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 
 const DEFAULT_CURRENCY = 'NGN';
 
+@ApiTags('Payroll')
+@ApiBearerAuth('access-token')
 @Controller({ path: 'payroll-runs', version: '1' })
 @UseGuards(JwtAuthGuard, PermissionGuard)
 export class PayrollRunController {
@@ -47,6 +50,7 @@ export class PayrollRunController {
     private readonly listPayrollRuns: ListPayrollRunsHandler,
   ) {}
 
+  @ApiOperation({ summary: 'Create a new payroll run for the specified month' })
   @RequirePermission('payroll:create')
   @Post()
   async create(
@@ -58,12 +62,14 @@ export class PayrollRunController {
     );
   }
 
+  @ApiOperation({ summary: 'Get a single payroll run by ID' })
   @RequirePermission('payroll:view_sensitive')
   @Get(':id')
   async getById(@Param('id') id: string, @CurrentUser() user: UserPrincipal) {
     return this.getPayrollRunById.execute(new GetPayrollRunByIdQuery(id, user.organizationId));
   }
 
+  @ApiOperation({ summary: 'List payroll runs for the organization, with optional pagination' })
   @RequirePermission('payroll:view_sensitive')
   @Get()
   async list(@Query() dto: ListPayrollRunsDto, @CurrentUser() user: UserPrincipal) {
@@ -72,6 +78,7 @@ export class PayrollRunController {
     );
   }
 
+  @ApiOperation({ summary: 'Add a payslip to an existing payroll run' })
   @RequirePermission('payroll:create')
   @Post(':id/payslips')
   async addPayslipToRun(
@@ -90,12 +97,14 @@ export class PayrollRunController {
     );
   }
 
+  @ApiOperation({ summary: 'Submit a payroll run for approval' })
   @RequirePermission('payroll:create')
   @Post(':id/submit')
   async submit(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
     await this.submitPayrollRun.execute(new SubmitPayrollRunCommand(id, user.organizationId));
   }
 
+  @ApiOperation({ summary: 'Approve a submitted payroll run' })
   @RequirePermission('payroll:approve')
   @Post(':id/approve')
   async approve(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
@@ -104,6 +113,7 @@ export class PayrollRunController {
     );
   }
 
+  @ApiOperation({ summary: 'Reject a submitted payroll run with a reason' })
   @RequirePermission('payroll:approve')
   @Post(':id/reject')
   async reject(
@@ -116,12 +126,14 @@ export class PayrollRunController {
     );
   }
 
+  @ApiOperation({ summary: 'Process an approved payroll run (finalize and generate payslips)' })
   @RequirePermission('payroll:create')
   @Post(':id/process')
   async process(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
     await this.processPayrollRun.execute(new ProcessPayrollRunCommand(id, user.organizationId));
   }
 
+  @ApiOperation({ summary: 'Cancel a payroll run (draft or submitted)' })
   @RequirePermission('payroll:create')
   @Post(':id/cancel')
   async cancel(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
