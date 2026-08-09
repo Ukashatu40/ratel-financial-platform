@@ -38,6 +38,7 @@ export const envSchema = z.object({
   FIELD_ENCRYPTION_MASTER_KEY: z
     .string()
     .min(44, 'FIELD_ENCRYPTION_MASTER_KEY must be a base64-encoded 32-byte key'),
+  OTEL_METRICS_PORT: z.coerce.number().int().positive().default(9464),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;
