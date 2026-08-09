@@ -1,5 +1,15 @@
 // src/contexts/expense/presentation/controllers/expense.controller.ts
-import { Body, Controller, Param, Post, UseGuards, Get, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Param,
+  Post,
+  UseGuards,
+  Get,
+  Query,
+  Req,
+  BadRequestException,
+} from '@nestjs/common';
 import { CreateExpenseHandler } from '../../application/handlers/create-expense.handler';
 import { SubmitExpenseHandler } from '../../application/handlers/submit-expense.handler';
 import { ApproveExpenseHandler } from '../../application/handlers/approve-expense.handler';
@@ -26,6 +36,13 @@ import { ListExpensesHandler } from '../../application/handlers/list-expenses.ha
 import { GetExpenseByIdQuery } from '../../application/queries/get-expense-by-id.query';
 import { ListExpensesQuery } from '../../application/queries/list-expenses.query';
 import { ListExpensesDto } from '../dto/list-expenses.dto';
+import { AttachFileHandler } from '../../application/handlers/attach-file.handler';
+import { GetAttachmentDownloadUrlHandler } from '../../application/handlers/get-attachment-download-url.handler';
+import { ListAttachmentsHandler } from '../../application/handlers/list-attachments.handler';
+import { AttachFileCommand } from '../../application/commands/attach-file.command';
+import { GetAttachmentDownloadUrlQuery } from '../../application/queries/get-attachment-download-url.query';
+import { ListAttachmentsQuery } from '../../application/queries/list-attachments.query';
+import { FastifyRequest } from 'fastify';
 
 @Controller({ path: 'expenses', version: '1' })
 @UseGuards(JwtAuthGuard, PermissionGuard)
@@ -39,6 +56,9 @@ export class ExpenseController {
     private readonly createAdjustment: CreateAdjustmentHandler,
     private readonly getExpenseById: GetExpenseByIdHandler,
     private readonly listExpenses: ListExpensesHandler,
+    private readonly attachFile: AttachFileHandler,
+    private readonly getAttachmentDownloadUrl: GetAttachmentDownloadUrlHandler,
+    private readonly listAttachments: ListAttachmentsHandler,
   ) {}
 
   @RequirePermission('expense:create') // was: { scope: 'own' } — create has no resource yet
@@ -119,6 +139,43 @@ export class ExpenseController {
     // was first built (piece 5 of M2).
     return this.createAdjustment.execute(
       new CreateAdjustmentCommand(id, user.organizationId, dto.reason),
+    );
+  }
+
+  // Reuses 'expense:create' + resourceType: 'expense' — same permission
+  // gate as submit/cancel, since attaching a receipt is naturally part of
+  // the same "own this draft" capability, not a separate grant.
+  @RequirePermission('expense:create', { resourceType: 'expense' })
+  @Post(':id/attachments')
+  async attach(
+    @Param('id') id: string,
+    @Req() req: FastifyRequest,
+    @CurrentUser() user: UserPrincipal,
+  ) {
+    const file = await req.file({ limits: { fileSize: 10 * 1024 * 1024 } });
+    if (!file) throw new BadRequestException('No file uploaded'); // was: throw new Error(...) -> 500
+
+    const buffer = await file.toBuffer();
+    return this.attachFile.execute(
+      new AttachFileCommand(id, user.organizationId, user.id, file.filename, file.mimetype, buffer),
+    );
+  }
+
+  @RequirePermission('expense:view', { resourceType: 'expense' })
+  @Get(':id/attachments')
+  async listAttachmentsForExpense(@Param('id') id: string, @CurrentUser() user: UserPrincipal) {
+    return this.listAttachments.execute(new ListAttachmentsQuery(id, user.organizationId));
+  }
+
+  @RequirePermission('expense:view', { resourceType: 'expense' })
+  @Get(':id/attachments/:attachmentId/download-url')
+  async getAttachmentUrl(
+    @Param('id') id: string,
+    @Param('attachmentId') attachmentId: string,
+    @CurrentUser() user: UserPrincipal,
+  ) {
+    return this.getAttachmentDownloadUrl.execute(
+      new GetAttachmentDownloadUrlQuery(id, attachmentId, user.organizationId),
     );
   }
 }

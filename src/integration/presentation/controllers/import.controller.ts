@@ -1,5 +1,5 @@
 // src/integration/presentation/controllers/import.controller.ts
-import { Controller, Get, Param, Post, Req, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param, Post, Req, UseGuards, BadRequestException } from '@nestjs/common';
 import { FastifyRequest } from 'fastify';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { InjectQueue } from '@nestjs/bullmq';
@@ -29,9 +29,7 @@ export class ImportController {
     @CurrentUser() user: UserPrincipal,
   ): Promise<{ importJobId: string }> {
     const file = await req.file({ limits: { fileSize: MAX_UPLOAD_SIZE_BYTES } });
-    if (!file) {
-      throw new Error('No file uploaded'); // caught by ProblemDetailsFilter as a generic 500 — acceptable for v1, worth a dedicated 400 later
-    }
+    if (!file) throw new BadRequestException('No file uploaded'); // was: throw new Error(...) -> 500
 
     const buffer = await file.toBuffer();
     const rawContent = buffer.toString('utf8');
