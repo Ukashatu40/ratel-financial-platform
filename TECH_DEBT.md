@@ -321,15 +321,16 @@ different layout.
 mapping arbitrary source headers to the canonical fields) — genuinely
 separate, larger scope from what this piece built.
 
-### 23. Import CSV content is stored in the database, not object storage
-**Where:** `ImportJob.rawContent` (Postgres `TEXT` column)
-**What:** The original blueprint specified Object Storage (S3-compatible)
-for receipts/invoices/imports (Phase "File Storage" section) — that module
-was never built. Storing raw CSV text directly in Postgres works for
-small files but doesn't scale to large imports and bypasses the
-virus-scanning/retention design from Phase 9.7.
-**To close:** Build the Object Storage module, switch `ImportJob` to store
-a storage key/reference instead of raw content.
+### 23. ~~Import CSV content is stored in the database, not object storage~~ — RESOLVED
+`ImportJob.rawContent TEXT` replaced with `storageKey`, pointing at the
+file in the same object storage now used for expense attachments.
+`ImportController` uploads to storage before creating the DB row (same
+upload-first-then-persist ordering as `AttachFileHandler`); `ImportJobProcessor`
+fetches the file via the new `ObjectStoragePort.download()` method instead
+of reading a DB column. One accepted new failure mode worth noting: import
+processing now depends on object storage being reachable, which it didn't
+before — a reasonable trade for closing the original gap, not a regression
+introduced silently.
 
 ### 24. ~~File upload has no dedicated 400 for "no file provided"~~ — RESOLVED
 Fixed in both `ImportController.create()` and `ExpenseController.attach()`
@@ -390,16 +391,6 @@ harnesses (same pattern as Postgres/Redis), and add a startup health-check
 (not necessarily `validateEnv`'s hard-fail, since object storage isn't
 needed for every deployment) that at least logs a warning if
 `OBJECT_STORAGE_*` is unset.
-
-### 23. ~~Import CSV content is stored in the database, not object storage~~ — INFRASTRUCTURE NOW EXISTS, NOT YET WIRED
-The Object Storage module (this piece) now exists and could store CSV
-import content instead of the current `ImportJob.rawContent TEXT` column
-— but `ImportJobProcessor`/`ImportController` haven't been updated to use
-it yet. Marking this "infrastructure ready" rather than fully resolved,
-since the actual switch-over is a small remaining piece of work, not a
-blocked one.
-
----
 
 ## Testing Infrastructure
 
