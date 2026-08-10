@@ -442,4 +442,85 @@ carry full detail).
 
 ---
 
-*Last updated: 2026-08-09, after the Observability piece.*
+## Notifications
+
+### 30. SMS is not actually integrated — logs a warning instead of sending
+**Where:** `ConsoleSmsProvider`
+**What:** No SMS provider account (Twilio, MSG91, VOS3000, etc.) exists to
+integrate against. `SmsProvider` port exists and is wired into DI, but its
+only implementation logs what would have been sent rather than sending
+anything. Same honest-gap discipline as `Attachment.scanStatus: 'unscanned'`.
+**To close:** Swap `ConsoleSmsProvider` for a real provider adapter once an
+account/API key exists — the port abstraction means nothing else in the
+codebase needs to change.
+
+### 31. `PayrollRunApproved` notifies the payroll admin only, not each employee
+**Where:** `NotificationSubscriber.handlePayrollRunApproved()`
+**What:** The more useful notification — each employee on the payslip
+getting their own "your pay is ready" email — needs one notification job
+per payslip (resolved from `run.getPayslips`), not a single run-level
+notification. Deliberately scoped down to avoid half-building the
+per-employee version in this pass.
+**To close:** Iterate `run.getPayslips` and enqueue one notification per
+employee, with its own template (distinct from the admin-facing one).
+
+### 32. Only 3 notification templates exist, not the full original catalog
+**Where:** `src/notifications/templates/notification-templates.ts`
+**What:** Covers `ExpenseApproved`, `ExpenseRejected`, `PayrollRunApproved`
+— the highest-value requester-facing moments. Financial-period close
+reminders, import-job completion notices, and other events from the
+original brief have no template or subscriber registration yet.
+**To close:** Additive — each new template + subscriber registration is
+independent of the others, no architectural change needed to add more.
+
+### 33. No delivery-tracking API — `NotificationLog` exists but nothing reads it
+**Where:** `NotificationLog` (Prisma model)
+**What:** Every send attempt is recorded (`pending`/`sent`/`failed`, with
+error detail), but no endpoint exposes this — no way for an admin to see
+"did this user's approval email actually arrive" without querying the DB
+directly. Mirrors the same gap ImportJob's `/errors` endpoint solves for
+CSV import, just not built for notifications yet.
+**To close:** A small `GET /notifications` (or scoped to a specific
+recipient/entity) endpoint, same shape as the import-errors endpoint.
+
+### 34. `NotificationProcessor` had no operational logging — retries were invisible
+**Where:** `NotificationProcessor.process()`
+**What:** Every other BullMQ processor in this codebase
+(`OutboxDispatchProcessor`, `ImportJobProcessor`) logs its outcome per run.
+`NotificationProcessor` originally logged nothing on success or failure,
+making retry attempts (and permanent failure) completely invisible in
+server logs — confirmed directly via a manual test where 3 retry attempts
+against a stopped Mailpit container produced zero console output, only
+silent `notification_logs` DB rows.
+**Status:** Fixed — now logs attempt number and outcome on both success and
+failure, explicitly flagging the terminal "PERMANENTLY FAILED, no more
+retries" case.
+
+### 35. A permanently-failed notification has no recovery path
+**Where:** `NotificationProcessor` / `NotificationsModule`'s BullMQ config
+**What:** `attempts: 3` with exponential backoff means the ENTIRE retry
+window is roughly 6-8 seconds, not minutes — confirmed via manual testing
+(stopping Mailpit, approving an expense, restarting Mailpit ~35 minutes
+later: the original notification was already permanently failed within
+seconds of the first attempt and was never retried again, despite Mailpit
+being back up long before any human would plausibly notice). Once BullMQ
+exhausts `attempts`, that notification is gone — no dead-letter queue for
+notifications specifically, no manual "retry this failed notification"
+endpoint, nothing except noticing a `status: 'failed'` row in
+`notification_logs` by querying the DB directly.
+**Why acceptable so far:** Notifications are informational (a person still
+sees their expense's real status via the API/UI regardless of whether an
+email arrived) — losing one isn't a data-integrity problem the way losing
+an audit entry or a payment would be. But it's still a real gap for a
+"production-grade" claim, especially for a genuinely extended outage.
+**To close:** Either (a) increase `attempts` with longer backoff for
+notifications specifically (a real SMTP/email-provider outage lasting
+minutes-to-hours is plausible), and/or (b) add a manual
+`POST /notifications/:id/retry` endpoint (admin-only) that re-enqueues a
+permanently-failed `NotificationLog` row — same DLQ-recovery pattern
+already built for CSV import's per-row failures, just not yet extended to
+this subsystem.
+
+---
+
+*Last updated: 2026-08-10, after the Notifications piece.*
