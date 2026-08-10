@@ -79,6 +79,12 @@ enum ImportJobStatus {
   failed
 }
 
+enum ScanStatus {
+  unscanned // no real virus scanner integrated yet — explicit, not pretending
+  clean
+  infected
+}
+
 // MODELS
 model OutboxEvent {
   id            String       @id @default(uuid())
@@ -461,7 +467,7 @@ model ImportJob {
   providerId     String          @map("provider_id") // 'csv-upload' today; future connectors add their own
   status         ImportJobStatus @default(pending)
   initiatedById  String          @map("initiated_by")
-  rawContent     String          @db.Text @map("raw_content") // see TECH_DEBT — stored in DB, not object storage, for v1
+  storageKey     String          @map("storage_key") // was: rawContent String @db.Text
   totalRecords   Int?            @map("total_records")
   successCount   Int             @default(0) @map("success_count")
   failureCount   Int             @default(0) @map("failure_count")
@@ -494,4 +500,19 @@ model FailedImportRecord {
   importJob ImportJob @relation(fields: [importJobId], references: [id])
 
   @@map("failed_import_records")
+}
+model Attachment {
+  id             String     @id @default(uuid())
+  expenseId      String     @map("expense_id")
+  organizationId String     @map("organization_id")
+  storageKey     String     @map("storage_key")
+  fileName       String     @map("file_name")
+  contentType    String     @map("content_type")
+  sizeBytes      Int        @map("size_bytes")
+  uploadedById   String     @map("uploaded_by")
+  scanStatus     ScanStatus @default(unscanned) @map("scan_status")
+  createdAt      DateTime   @default(now()) @map("created_at")
+
+  @@index([expenseId])
+  @@map("attachments")
 }
