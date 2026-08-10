@@ -1,12 +1,13 @@
 // src/jobs/processors/import-job.processor.ts
 import { Processor, WorkerHost } from '@nestjs/bullmq';
-import { Logger } from '@nestjs/common';
+import { Inject, Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
   CsvProviderAdapter,
   CsvParseError,
 } from '../../integration/adapters/csv/csv-provider.adapter';
+import { OBJECT_STORAGE_PORT, ObjectStoragePort } from '../../storage/object-storage.port';
 import { CsvNormalizer, CsvRowValidationError } from '../../integration/normalizers/csv-normalizer';
 import { InboxService } from '../../integration/inbox/inbox.service';
 import { ImportMappingError, ImportRecordMapper } from '../../integration/acl/import-record-mapper';
@@ -28,6 +29,7 @@ export class ImportJobProcessor extends WorkerHost {
     private readonly inbox: InboxService,
     private readonly mapper: ImportRecordMapper,
     private readonly createExpense: CreateExpenseHandler, // the SAME handler manual creation uses
+    @Inject(OBJECT_STORAGE_PORT) private readonly storage: ObjectStoragePort,
   ) {
     super();
   }
@@ -43,14 +45,16 @@ export class ImportJobProcessor extends WorkerHost {
 
     let rows;
     try {
-      rows = this.csvAdapter.parse(importJob.rawContent);
+      const buffer = await this.storage.download(importJob.storageKey); // was: importJob.rawContent directly
+      rows = this.csvAdapter.parse(buffer.toString('utf8'));
     } catch (err) {
-      // Catastrophic failure (unparseable file) — nothing to process at all.
       await this.prisma.importJob.update({
         where: { id: importJobId },
         data: { status: 'failed', completedAt: new Date() },
       });
-      this.logger.error(`Import job ${importJobId} failed to parse: ${(err as Error).message}`);
+      this.logger.error(
+        `Import job ${importJobId} failed to fetch/parse: ${(err as Error).message}`,
+      );
       return;
     }
 

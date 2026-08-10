@@ -1,5 +1,15 @@
 // src/integration/presentation/controllers/import.controller.ts
-import { Controller, Get, Param, Post, Req, UseGuards, BadRequestException } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Param,
+  Post,
+  Req,
+  UseGuards,
+  BadRequestException,
+  Inject,
+} from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { FastifyRequest } from 'fastify';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { InjectQueue } from '@nestjs/bullmq';
@@ -11,6 +21,7 @@ import { RequirePermission } from '../../../auth/authorization/permission.decora
 import { CurrentUser } from '../../../auth/authentication/current-user.decorator';
 import { UserPrincipal } from '../../../shared-kernel/auth/user-principal';
 import { IMPORT_JOB_NAME, IMPORT_JOB_QUEUE } from '../../../jobs/queues/import-job.queue';
+import { OBJECT_STORAGE_PORT, ObjectStoragePort } from '../../../storage/object-storage.port';
 import { ApiBearerAuth, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 
 const MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024; // 5MB — generous for CSV, deliberately capped
@@ -23,6 +34,7 @@ export class ImportController {
   constructor(
     private readonly prisma: PrismaService,
     @InjectQueue(IMPORT_JOB_QUEUE) private readonly queue: Queue,
+    @Inject(OBJECT_STORAGE_PORT) private readonly storage: ObjectStoragePort,
   ) {}
 
   @ApiOperation({
@@ -37,18 +49,22 @@ export class ImportController {
     @CurrentUser() user: UserPrincipal,
   ): Promise<{ importJobId: string }> {
     const file = await req.file({ limits: { fileSize: MAX_UPLOAD_SIZE_BYTES } });
-    if (!file) throw new BadRequestException('No file uploaded'); // was: throw new Error(...) -> 500
+    if (!file) throw new BadRequestException('No file uploaded');
 
     const buffer = await file.toBuffer();
-    const rawContent = buffer.toString('utf8');
+    const importJobId = randomUUID(); // generated up front so the storage key can reference it before the DB row exists
+    const storageKey = `${user.organizationId}/imports/${importJobId}.csv`;
+
+    await this.storage.upload(storageKey, buffer, 'text/csv');
 
     const importJob = await this.prisma.importJob.create({
       data: {
+        id: importJobId,
         organizationId: user.organizationId,
         providerId: 'csv-upload',
         status: 'pending',
         initiatedById: user.id,
-        rawContent,
+        storageKey,
       },
     });
 
