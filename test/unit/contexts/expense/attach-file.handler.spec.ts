@@ -29,18 +29,26 @@ function buildDeps(overrides: { expense?: Expense | null } = {}) {
   return {
     expenseRepo: { findById: jest.fn().mockResolvedValue(expense) },
     storage: { upload: jest.fn().mockResolvedValue(undefined) },
+    scanQueue: { add: jest.fn().mockResolvedValue(undefined) },
     prisma: { attachment: { create: jest.fn().mockResolvedValue({}) } },
   };
+}
+
+/** Keeps the 4 constructor args (and their ORDER) in one place — the whole
+ *  file broke when the scan queue was inserted at index 2. */
+function buildHandler(deps: ReturnType<typeof buildDeps>) {
+  return new AttachFileHandler(
+    deps.expenseRepo as any,
+    deps.storage as any,
+    deps.scanQueue as any,
+    deps.prisma as any,
+  );
 }
 
 describe('AttachFileHandler', () => {
   it('rejects an unsupported content type before touching storage or the DB', async () => {
     const deps = buildDeps();
-    const handler = new AttachFileHandler(
-      deps.expenseRepo as any,
-      deps.storage as any,
-      deps.prisma as any,
-    );
+    const handler = buildHandler(deps);
     const cmd = new AttachFileCommand(
       'exp-1',
       'org-1',
@@ -56,11 +64,7 @@ describe('AttachFileHandler', () => {
 
   it('rejects a file over the size limit before touching storage', async () => {
     const deps = buildDeps();
-    const handler = new AttachFileHandler(
-      deps.expenseRepo as any,
-      deps.storage as any,
-      deps.prisma as any,
-    );
+    const handler = buildHandler(deps);
     const oversized = Buffer.alloc(11 * 1024 * 1024); // 11MB > 10MB limit
     const cmd = new AttachFileCommand(
       'exp-1',
@@ -77,11 +81,7 @@ describe('AttachFileHandler', () => {
 
   it('throws EntityNotFoundError when the expense does not exist', async () => {
     const deps = buildDeps({ expense: null });
-    const handler = new AttachFileHandler(
-      deps.expenseRepo as any,
-      deps.storage as any,
-      deps.prisma as any,
-    );
+    const handler = buildHandler(deps);
     const cmd = new AttachFileCommand(
       'missing',
       'org-1',
@@ -96,11 +96,7 @@ describe('AttachFileHandler', () => {
 
   it('throws EntityNotFoundError when the expense belongs to a different organization', async () => {
     const deps = buildDeps({ expense: buildExpense('org-OTHER') });
-    const handler = new AttachFileHandler(
-      deps.expenseRepo as any,
-      deps.storage as any,
-      deps.prisma as any,
-    );
+    const handler = buildHandler(deps);
     const cmd = new AttachFileCommand(
       'exp-1',
       'org-1',
@@ -116,11 +112,7 @@ describe('AttachFileHandler', () => {
   it('uploads to storage BEFORE persisting the DB row — never creates a metadata row for a failed upload', async () => {
     const deps = buildDeps();
     deps.storage.upload = jest.fn().mockRejectedValue(new Error('S3 down'));
-    const handler = new AttachFileHandler(
-      deps.expenseRepo as any,
-      deps.storage as any,
-      deps.prisma as any,
-    );
+    const handler = buildHandler(deps);
     const cmd = new AttachFileCommand(
       'exp-1',
       'org-1',
@@ -136,11 +128,7 @@ describe('AttachFileHandler', () => {
 
   it('always persists scanStatus as "unscanned" — never a misleading default', async () => {
     const deps = buildDeps();
-    const handler = new AttachFileHandler(
-      deps.expenseRepo as any,
-      deps.storage as any,
-      deps.prisma as any,
-    );
+    const handler = buildHandler(deps);
     const cmd = new AttachFileCommand(
       'exp-1',
       'org-1',
@@ -159,11 +147,7 @@ describe('AttachFileHandler', () => {
 
   it('builds a storage key that includes organizationId and expenseId (namespacing, not just a flat filename)', async () => {
     const deps = buildDeps();
-    const handler = new AttachFileHandler(
-      deps.expenseRepo as any,
-      deps.storage as any,
-      deps.prisma as any,
-    );
+    const handler = buildHandler(deps);
     const cmd = new AttachFileCommand(
       'exp-1',
       'org-1',
