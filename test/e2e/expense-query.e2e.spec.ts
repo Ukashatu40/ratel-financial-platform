@@ -19,7 +19,10 @@ describe('Expense query endpoints (e2e)', () => {
   });
 
   afterAll(async () => {
-    await app.close();
+    // Guarded: if createTestApp() threw in beforeAll, `app` is undefined and an
+    // unguarded app.close() throws a second error that REPLACES the real
+    // bootstrap failure in Jest's output, hiding why the suite actually failed.
+    await app?.close();
   });
 
   let employee1Token: string;

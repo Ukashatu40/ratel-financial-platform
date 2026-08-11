@@ -23,7 +23,10 @@ describe('Attachments (e2e)', () => {
   });
 
   afterAll(async () => {
-    await app.close();
+    // Guarded: if createTestApp() threw in beforeAll, `app` is undefined and an
+    // unguarded app.close() throws a second error that REPLACES the real
+    // bootstrap failure in Jest's output, hiding why the suite actually failed.
+    await app?.close();
   });
 
   beforeEach(async () => {
@@ -107,6 +110,10 @@ describe('Attachments (e2e)', () => {
 
     const attachmentId = uploadRes.body.attachmentId;
 
+    // Scan runs async — wait for it to complete before attempting download,
+    // since downloads are now correctly blocked while scanStatus: 'unscanned'.
+    await new Promise((r) => setTimeout(r, 5000));
+
     const urlRes = await request(server)
       .get(`/api/v1/expenses/${expenseId}/attachments/${attachmentId}/download-url`)
       .set('Authorization', `Bearer ${employeeToken}`)
@@ -168,5 +175,33 @@ describe('Attachments (e2e)', () => {
 
     expect(listRes.body).toHaveLength(2);
     expect(listRes.body[0].fileName).toBe('second.pdf'); // most recent first
+  });
+
+  it('rejects downloading a file flagged as infected (EICAR test string)', async () => {
+    // Industry-standard antivirus test signature — a harmless string every
+    // real antivirus engine (including ClamAV) is specifically designed to
+    // flag, used precisely so this test never involves an actual virus.
+    const EICAR = Buffer.from(
+      'X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*',
+    );
+
+    const uploadRes = await request(server)
+      .post(`/api/v1/expenses/${expenseId}/attachments`)
+      .set('Authorization', `Bearer ${employeeToken}`)
+      .attach('file', EICAR, { filename: 'eicar.pdf', contentType: 'application/pdf' })
+      .expect(201);
+
+    await new Promise((r) => setTimeout(r, 5000)); // wait for scan
+
+    await request(server)
+      .get(`/api/v1/expenses/${expenseId}/attachments/${uploadRes.body.attachmentId}/download-url`)
+      .set('Authorization', `Bearer ${employeeToken}`)
+      .expect(409); // AttachmentNotSafeToDownloadError
+
+    const prisma = getE2eDbClient();
+    const attachment = await prisma.attachment.findUniqueOrThrow({
+      where: { id: uploadRes.body.attachmentId },
+    });
+    expect(attachment.scanStatus).toBe('infected');
   });
 });
