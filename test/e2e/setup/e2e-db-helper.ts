@@ -37,6 +37,12 @@ export async function cleanE2eDatabase(): Promise<void> {
   const tables = [
     'audit_log_entries',
     'outbox_events',
+    'notification_logs',
+    'attachments',
+    'failed_import_records',
+    'inbox_records',
+    'import_jobs',
+    'expense_read_model',
     'approval_records',
     'approval_progress',
     'payslips',
