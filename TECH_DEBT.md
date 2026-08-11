@@ -523,4 +523,83 @@ this subsystem.
 
 ---
 
-*Last updated: 2026-08-10, after the Notifications piece.*
+## Virus Scanning (ClamAV) — Wiring Bugs Found & Fixed
+
+### 36. Multiple e2e-breaking bugs surfaced while adding real virus scanning — all resolved
+**What happened:** Adding ClamAV integration (closing item #26) triggered a
+chain of issues, each masking the next:
+1. `StorageModule` registered the `attachment-scan` BullMQ queue via
+   `BullModule.registerQueue(...)` but never re-exported `BullModule` —
+   `@Global()` only propagates a module's own `exports`, not providers
+   pulled in from an internally-imported module without re-exporting them.
+   `AttachFileHandler` (in `ExpenseModule`) couldn't resolve the queue
+   token, so the entire app failed to boot in every e2e test.
+   **Fixed:** `StorageModule` now re-exports `BullModule`.
+2. Every e2e spec's `afterAll(() => app.close())` was unguarded — when
+   `beforeAll` (app boot) failed, `app` stayed `undefined`, and `afterAll`
+   threw its own `TypeError`, which Jest reported instead of the real
+   NestJS DI error underneath it. **Fixed:** `app?.close()` everywhere.
+3. `cleanE2eDatabase()`'s manually-maintained table list was missing 6
+   tables added across later pieces (`attachments`, `expense_read_model`,
+   `import_jobs`, `inbox_records`, `failed_import_records`,
+   `notification_logs`) — exactly the drift risk flagged in that
+   function's own original comment, which wasn't kept up to date in
+   practice despite the warning. **Fixed:** table list updated. **Not
+   fixed:** the underlying maintenance burden — see item #37 below.
+4. A unit test file's handler constructor calls (7 call sites) hadn't been
+   updated after a new constructor parameter was inserted mid-signature.
+   **Fixed:** consolidated into one `buildHandler()` helper so future
+   constructor changes touch one line, not seven.
+5. `tsconfig.json` had `isolatedModules: true` set, which requires every
+   type used in a decorated class signature (constructor params on
+   `@Injectable()` classes) to be imported via `import type` explicitly —
+   this build's actual toolchain (plain `tsc` via `nest build`, `ts-jest`
+   without its own isolated-modules option) never needed that constraint.
+   Surfaced as 101 `TS1272` errors on a full `npm run build`, invisible
+   via `ts-jest` (which compiles differently). **Fixed:** removed the flag
+   — safe for this toolchain; would need proper `import type` annotations
+   (not just re-disabling the flag) if a per-file transpiler (SWC/esbuild)
+   is adopted later.
+
+All 5 issues confirmed resolved: 31/31 e2e tests passing, 146/146 unit
+tests passing, `npm run build` clean.
+
+### 37. `cleanE2eDatabase()`'s table list still requires manual maintenance
+**Where:** `test/integration/setup/db-helper.ts`,
+`test/e2e/setup/e2e-db-helper.ts`
+**What:** Item #36's point 3 got patched, but the underlying risk is
+unchanged — the table list is still a hardcoded array that silently falls
+out of sync every time a new table is added, exactly as it already did
+once. The original design comment reasoned this was deliberate (avoid
+silently including new tables without an explicit decision) — but in
+practice, "explicit decision" has meant "gets forgotten," twice now if you
+count the original build and this incident.
+**To close:** Switch to dynamically querying
+`information_schema.tables` (filtered to exclude Prisma's own
+`_prisma_migrations`) and truncating everything found, rather than a
+hardcoded list — trading "must remember to update a list" for "always
+truncates whatever actually exists," which is the safer default for test
+cleanup specifically (a stale test fixture leaking into another test is a
+worse failure mode than accidentally truncating a table that didn't need
+it in a throwaway test database).
+
+### 38. Async attachment scan jobs can race against e2e test cleanup
+**Where:** e2e test teardown/setup boundary, `AttachmentScanProcessor`
+**What:** Confirmed once, harmlessly: `cleanE2eDatabase()` truncating
+`attachments` between tests can delete a row a still-in-flight scan job
+(from the previous test) is about to update, producing a caught, logged,
+retried-to-permanent-failure Prisma error (`P2025`, record not found).
+Doesn't fail any test — the orphaned scan simply fails against a target
+that's correctly gone — but adds log noise.
+**Why acceptable:** This is a test-environment-only artifact (production
+never truncates tables mid-workload); the underlying "update targets a
+possibly-deleted row" pattern already fails safely everywhere else it
+occurs in this codebase (same class of issue as the outbox dispatcher's
+`updateMany` fix from earlier in this build).
+**To close:** Low priority — could wait for pending scan jobs to settle
+between e2e tests, but the cost (log noise in test output only) doesn't
+currently justify the added test complexity.
+
+---
+
+*Last updated: 2026-08-11, after resolving the ClamAV integration wiring bugs.*
