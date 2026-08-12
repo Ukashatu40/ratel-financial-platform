@@ -18,6 +18,8 @@ import { ReportingModule } from './reporting/reporting.module';
 import { IntegrationModule } from './integration/integration.module';
 import { StorageModule } from './storage/storage.module';
 import { ObservabilityModule } from './observability/observability.module';
+import { NotificationsModule } from './notifications/notifications.module';
+import { ReferenceDataModule } from './reference-data/reference-data.module';
 /**
  * Import order matters for readability, not execution — ConfigModule and
  * PrismaModule/SharedKernelModule are @Global(), so every context module
@@ -39,6 +41,8 @@ import { ObservabilityModule } from './observability/observability.module';
     StorageModule,
     ObservabilityModule,
     JobsModule, // <-- add, after Encryption/SharedKernel since it depends on both
+    NotificationsModule,
+    ReferenceDataModule,
     FinancialPeriodModule,
     ExpenseModule,
     PayrollModule,
