@@ -38,6 +38,14 @@ const MATRIX: Array<{ role: string; permission: string; scope: string }> = [
   { role: 'department_head', permission: 'expense:view', scope: 'department' },
   { role: 'accountant', permission: 'expense:view', scope: 'organization' },
   { role: 'finance_director', permission: 'expense:view', scope: 'organization' },
+
+  // Report Viewing
+  { role: 'department_head', permission: 'report:view', scope: 'department' },
+  { role: 'accountant', permission: 'report:view', scope: 'organization' },
+  { role: 'finance_director', permission: 'report:view', scope: 'organization' },
+
+  { role: 'accountant', permission: 'reference-data:manage', scope: 'organization' },
+  { role: 'finance_director', permission: 'reference-data:manage', scope: 'organization' },
 ];
 
 export async function seedRolePermissions(prisma: PrismaClient) {
