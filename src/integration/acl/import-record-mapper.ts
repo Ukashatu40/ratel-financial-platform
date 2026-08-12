@@ -32,29 +32,46 @@ export class ImportRecordMapper {
     initiatedById: string,
   ): Promise<CreateExpenseCommand> {
     const department = await this.prisma.department.findFirst({
-      where: { organizationId, name: { equals: record.departmentName, mode: 'insensitive' } },
+      where: {
+        organizationId,
+        name: { equals: record.departmentName, mode: 'insensitive' },
+        isActive: true,
+      },
     });
     if (!department) {
       throw new ImportMappingError(
-        `Department "${record.departmentName}" does not exist for this organization`,
+        `Department "${record.departmentName}" does not exist or is inactive for this organization`,
       );
     }
 
     const category = await this.prisma.expenseCategory.findFirst({
-      where: { organizationId, name: { equals: record.categoryName, mode: 'insensitive' } },
+      where: {
+        organizationId,
+        name: { equals: record.categoryName, mode: 'insensitive' },
+        isActive: true,
+      },
     });
     if (!category) {
       throw new ImportMappingError(
-        `Category "${record.categoryName}" does not exist for this organization`,
+        `Category "${record.categoryName}" does not exist or is inactive for this organization`,
       );
     }
 
     let vendorId: string | undefined;
     if (record.vendorName) {
+      // Deliberate choice: if a CSV import references a vendor name that
+      // matches a DEACTIVATED vendor, reactivate it rather than treating
+      // it as an error — an import naming a vendor is implicitly saying
+      // "we're transacting with them again." This is consistent with
+      // vendors already being the least strictly governed of the four
+      // reference-data types (Phase 3.3's original reasoning: open-ended,
+      // auto-creatable). Department/category deliberately do NOT get this
+      // treatment — those stay hard-blocked until someone explicitly
+      // reactivates them via the reference-data API.
       const vendor = await this.prisma.vendor.upsert({
         where: { organizationId_name: { organizationId, name: record.vendorName } },
         create: { organizationId, name: record.vendorName },
-        update: {},
+        update: { isActive: true },
       });
       vendorId = vendor.id;
     }

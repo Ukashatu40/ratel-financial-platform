@@ -61,3 +61,25 @@ export class ApproverRoleMismatchError extends DomainError {
     );
   }
 }
+
+export class AttachmentNotSafeToDownloadError extends DomainError {
+  readonly code = 'attachment-not-safe';
+  readonly httpStatus = 409;
+
+  constructor(scanStatus: string) {
+    super(
+      scanStatus === 'infected'
+        ? 'This file was flagged as infected and cannot be downloaded'
+        : 'This file has not finished virus scanning yet — try again in a moment',
+    );
+  }
+}
+
+export class InactiveOrMissingReferenceDataError extends DomainError {
+  readonly code = 'inactive-or-missing-reference-data';
+  readonly httpStatus = 400;
+
+  constructor(entityType: string, id: string) {
+    super(`${entityType} "${id}" does not exist or is no longer active`);
+  }
+}
