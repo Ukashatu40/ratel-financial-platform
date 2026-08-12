@@ -85,6 +85,17 @@ enum ScanStatus {
   infected
 }
 
+enum NotificationChannel {
+  email
+  sms
+}
+
+enum NotificationStatus {
+  pending
+  sent
+  failed
+}
+
 // MODELS
 model OutboxEvent {
   id            String       @id @default(uuid())
@@ -212,7 +223,9 @@ model Department {
   id             String   @id @default(uuid())
   organizationId String   @map("organization_id")
   name           String
+  isActive       Boolean  @default(true) @map("is_active")
   createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
 
   expenses Expense[]
 
@@ -224,7 +237,9 @@ model Vendor {
   id             String   @id @default(uuid())
   organizationId String   @map("organization_id")
   name           String
+  isActive       Boolean  @default(true) @map("is_active")
   createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
 
   expenses Expense[]
 
@@ -236,10 +251,13 @@ model Project {
   id             String   @id @default(uuid())
   organizationId String   @map("organization_id")
   name           String
+  isActive       Boolean  @default(true) @map("is_active")
   createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
 
   expenses Expense[]
 
+  @@unique([organizationId, name]) // NEW — Project never had this; adding for consistency with the other three
   @@map("projects")
 }
 
@@ -247,7 +265,9 @@ model ExpenseCategory {
   id             String   @id @default(uuid())
   organizationId String   @map("organization_id")
   name           String
+  isActive       Boolean  @default(true) @map("is_active")
   createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
 
   expenses Expense[]
 
@@ -515,4 +535,20 @@ model Attachment {
 
   @@index([expenseId])
   @@map("attachments")
+}
+
+model NotificationLog {
+  id             String              @id @default(uuid())
+  organizationId String              @map("organization_id")
+  recipientUserId String             @map("recipient_user_id")
+  channel        NotificationChannel
+  templateType   String              @map("template_type")
+  status         NotificationStatus  @default(pending)
+  errorMessage   String?             @map("error_message")
+  createdAt      DateTime            @default(now()) @map("created_at")
+  sentAt         DateTime?           @map("sent_at")
+
+  @@index([recipientUserId])
+  @@index([organizationId, status])
+  @@map("notification_logs")
 }
