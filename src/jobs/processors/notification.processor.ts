@@ -52,6 +52,7 @@ export class NotificationProcessor extends WorkerHost {
         recipientUserId,
         channel: 'email',
         templateType,
+        templateData: templateData as any, // NEW — persisted now, needed for retry reconstruction
         status: 'pending',
       },
     });
