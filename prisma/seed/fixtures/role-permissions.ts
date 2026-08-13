@@ -46,6 +46,9 @@ const MATRIX: Array<{ role: string; permission: string; scope: string }> = [
 
   { role: 'accountant', permission: 'reference-data:manage', scope: 'organization' },
   { role: 'finance_director', permission: 'reference-data:manage', scope: 'organization' },
+
+  { role: 'accountant', permission: 'notification:manage', scope: 'organization' },
+  { role: 'finance_director', permission: 'notification:manage', scope: 'organization' },
 ];
 
 export async function seedRolePermissions(prisma: PrismaClient) {
