@@ -58,44 +58,29 @@ export async function disconnectTestDatabase(): Promise<void> {
     sharedPool = null;
   }
 }
+let cachedTableNames: string[] | null = null;
+
 /**
- * Truncates every application table between tests, so tests don't leak
- * state into each other despite sharing one container/database. Uses
- * TRUNCATE ... CASCADE and RESTART IDENTITY so auto-increment-like
- * behavior (our UUID PKs don't need this, but sequences like
- * expense_number_sequences do) resets cleanly too.
- *
- * Table list maintained manually rather than introspected dynamically —
- * deliberate: an introspection-based approach would silently include any
- * NEW table added later without a decision being made about whether it
- * should be cleaned, whereas this list forces an explicit update alongside
- * any schema change that adds a table integration tests touch.
+ * Discovers actual tables via pg_tables rather than a hardcoded list —
+ * closes TECH_DEBT #37/#36: a hardcoded list silently drifts out of sync
+ * every time a new table is added (confirmed twice now — the original
+ * build, then again during the ClamAV integration piece). Cached per test
+ * FILE (Jest isolates modules per file by default), so this only queries
+ * pg_tables once per file, not once per test, while still re-discovering
+ * fresh on every new test run (a new migration between runs is picked up
+ * automatically).
  */
 export async function cleanDatabase(prisma: PrismaClient): Promise<void> {
-  const tables = [
-    'audit_log_entries',
-    'outbox_events',
-    'approval_records',
-    'approval_progress',
-    'payslips',
-    'payroll_runs',
-    'salary_structures',
-    'employees',
-    'expenses',
-    'expense_number_sequences',
-    'expense_categories',
-    'projects',
-    'vendors',
-    'departments',
-    'refresh_tokens',
-    'user_role_assignments',
-    'role_permissions',
-    'users',
-    'financial_periods',
-    'organizations',
-  ];
+  if (!cachedTableNames) {
+    const rows = await prisma.$queryRaw<Array<{ tablename: string }>>`
+      SELECT tablename FROM pg_tables
+      WHERE schemaname = 'public' AND tablename != '_prisma_migrations'
+    `;
+    cachedTableNames = rows.map((r) => r.tablename);
+  }
 
-  await prisma.$executeRawUnsafe(
-    `TRUNCATE TABLE ${tables.map((t) => `"${t}"`).join(', ')} CASCADE`,
-  );
+  if (cachedTableNames.length === 0) return;
+
+  const tableList = cachedTableNames.map((t) => `"${t}"`).join(', ');
+  await prisma.$executeRawUnsafe(`TRUNCATE TABLE ${tableList} CASCADE`);
 }

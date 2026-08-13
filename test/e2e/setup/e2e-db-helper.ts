@@ -32,39 +32,23 @@ export function getE2eDbClient(): PrismaClient {
   return sharedClient;
 }
 
+let cachedTableNames: string[] | null = null;
+
 export async function cleanE2eDatabase(): Promise<void> {
   const prisma = getE2eDbClient();
-  const tables = [
-    'audit_log_entries',
-    'outbox_events',
-    'notification_logs',
-    'attachments',
-    'failed_import_records',
-    'inbox_records',
-    'import_jobs',
-    'expense_read_model',
-    'approval_records',
-    'approval_progress',
-    'payslips',
-    'payroll_runs',
-    'salary_structures',
-    'employees',
-    'expenses',
-    'expense_number_sequences',
-    'expense_categories',
-    'projects',
-    'vendors',
-    'departments',
-    'refresh_tokens',
-    'user_role_assignments',
-    'role_permissions',
-    'users',
-    'financial_periods',
-    'organizations',
-  ];
-  await prisma.$executeRawUnsafe(
-    `TRUNCATE TABLE ${tables.map((t) => `"${t}"`).join(', ')} CASCADE`,
-  );
+
+  if (!cachedTableNames) {
+    const rows = await prisma.$queryRaw<Array<{ tablename: string }>>`
+      SELECT tablename FROM pg_tables
+      WHERE schemaname = 'public' AND tablename != '_prisma_migrations'
+    `;
+    cachedTableNames = rows.map((r) => r.tablename);
+  }
+
+  if (cachedTableNames.length === 0) return;
+
+  const tableList = cachedTableNames.map((t) => `"${t}"`).join(', ');
+  await prisma.$executeRawUnsafe(`TRUNCATE TABLE ${tableList} CASCADE`);
 }
 
 export async function disconnectE2eDb(): Promise<void> {
