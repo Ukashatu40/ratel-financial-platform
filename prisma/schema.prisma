@@ -538,15 +538,16 @@ model Attachment {
 }
 
 model NotificationLog {
-  id             String              @id @default(uuid())
-  organizationId String              @map("organization_id")
-  recipientUserId String             @map("recipient_user_id")
-  channel        NotificationChannel
-  templateType   String              @map("template_type")
-  status         NotificationStatus  @default(pending)
-  errorMessage   String?             @map("error_message")
-  createdAt      DateTime            @default(now()) @map("created_at")
-  sentAt         DateTime?           @map("sent_at")
+  id              String              @id @default(uuid())
+  organizationId  String              @map("organization_id")
+  recipientUserId String              @map("recipient_user_id")
+  channel         NotificationChannel
+  templateType    String              @map("template_type")
+  templateData    Json                @map("template_data") // NEW — required to reconstruct a retry
+  status          NotificationStatus  @default(pending)
+  errorMessage    String?             @map("error_message")
+  createdAt       DateTime            @default(now()) @map("created_at")
+  sentAt          DateTime?           @map("sent_at")
 
   @@index([recipientUserId])
   @@index([organizationId, status])
