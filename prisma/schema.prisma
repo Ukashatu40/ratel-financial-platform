@@ -465,6 +465,7 @@ model ExpenseReadModel {
   vendorId         String?  @map("vendor_id")
   vendorName       String?  @map("vendor_name")
   projectId        String?  @map("project_id")
+  projectName String? @map("project_name")
   amountMinorUnits BigInt   @map("amount_minor_units") // SIGNED — adjustments carry negative values,
                                                          // so summing this column naturally nets out
                                                          // reversals against originals, no special-casing
@@ -475,6 +476,7 @@ model ExpenseReadModel {
   createdAt        DateTime @map("created_at")
   updatedAt        DateTime @map("updated_at")
 
+  @@index([organizationId, projectId, status, expenseDate])
   @@index([organizationId, departmentId, status, expenseDate])
   @@index([organizationId, categoryId, status, expenseDate])
   @@index([organizationId, vendorId, status, expenseDate])
