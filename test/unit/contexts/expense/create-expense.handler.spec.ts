@@ -58,7 +58,7 @@ function buildDeps(
   return { prisma, repo, periodStatus, uow, outbox };
 }
 
-function buildCommand(overrides: Partial<{ vendorId?: string; projectId?: string }> = {}) {
+function buildCommand(overrides: { vendorId?: string; projectId?: string } = {}) {
   return new CreateExpenseCommand(
     'org-1',
     humanSource('employee', 'user-1'),
@@ -67,8 +67,8 @@ function buildCommand(overrides: Partial<{ vendorId?: string; projectId?: string
     'cat-1',
     'dept-1',
     new Date('2026-08-01'),
-    overrides.vendorId ?? 'vendor-1',
-    overrides.projectId ?? 'proj-1',
+    'vendorId' in overrides ? overrides.vendorId : 'vendor-1',
+    'projectId' in overrides ? overrides.projectId : 'proj-1',
   );
 }
 
