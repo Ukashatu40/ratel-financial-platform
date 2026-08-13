@@ -1,0 +1,24 @@
+// src/reporting/reporting.module.ts
+import { Module } from '@nestjs/common';
+import { ExpenseReadModelProjector } from './infrastructure/projectors/expense-read-model.projector';
+import { DepartmentSpendingSummaryHandler } from './application/handlers/department-spending-summary.handler';
+import { TopCategoriesHandler } from './application/handlers/top-categories.handler';
+import { TopVendorsHandler } from './application/handlers/top-vendors.handler';
+import { ReportsController } from './presentation/controllers/reports.controller';
+import { CashOutflowHandler } from './application/handlers/cash-outflow.handler';
+import { ProjectSpendingHandler } from './application/handlers/project-spending.handler';
+import { PayrollSummaryHandler } from './application/handlers/payroll-summary.handler';
+
+@Module({
+  controllers: [ReportsController],
+  providers: [
+    ExpenseReadModelProjector,
+    DepartmentSpendingSummaryHandler,
+    TopCategoriesHandler,
+    TopVendorsHandler,
+    CashOutflowHandler,
+    ProjectSpendingHandler,
+    PayrollSummaryHandler, // <-- add
+  ],
+})
+export class ReportingModule {}
