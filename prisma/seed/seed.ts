@@ -14,12 +14,42 @@ import { seedSalaryStructures } from './fixtures/salary-structures';
 import { seedRolePermissions } from './fixtures/role-permissions';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
+import { Logger } from '@nestjs/common';
 
 loadEnv(); // ts-node doesn't auto-load .env the way Nest's bootstrap does — needed here explicitly
+
+const logger = new Logger('prisma/seed/seed.ts', { timestamp: true });
 
 // 1. Instantiate a proper connection pool instance
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
+});
+
+// REQUIRED by node-postgres: without this listener, an idle client
+// losing its connection (e.g. the container being stopped, a network
+// blip, Postgres restarting) emits an 'error' event with NO listener
+// attached — which Node treats as an unhandled exception and crashes
+// the whole process, exactly what happened here. This isn't optional
+// defensive code; it's the documented, required pattern for using
+// `pg.Pool` at all.
+pool.on('error', (err) => {
+  pool.on('error', (err) => {
+    const isExpectedTermination =
+      err.message?.includes('terminating connection') || err.message?.includes('57P01');
+
+    if (isExpectedTermination) {
+      // Still logged — just at a lower severity, since this specific error
+      // is common during graceful shutdowns/restarts and less urgent than
+      // an unexpected drop. NEVER fully silent in production code, unlike
+      // the test harness's swallow-entirely approach, which is only safe
+      // there because we control exactly when/why the DB goes away.
+      logger.warn(`Database connection terminated: ${err.message}`);
+    } else {
+      logger.error(`Unexpected database connection error: ${err.message}`, err.stack);
+    }
+  });
+  // eslint-disable-next-line no-console
+  console.warn('[test db pool] Idle client error (often expected during teardown):', err.message);
 });
 
 const adapter = new PrismaPg(pool);
