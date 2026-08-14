@@ -19,13 +19,22 @@ import { CancelPayrollRunHandler } from './application/handlers/cancel-payroll-r
 import { PayrollRunController } from './presentation/controllers/payroll-run.controller';
 import { GetPayrollRunByIdHandler } from './application/handlers/get-payroll-run-by-id.handler';
 import { ListPayrollRunsHandler } from './application/handlers/list-payroll-runs.handler';
+import { EmployeeController } from './presentation/controllers/employee.controller';
+import {
+  CreateEmployeeHandler,
+  LinkEmployeeToUserHandler,
+  UnlinkEmployeeFromUserHandler,
+  DeactivateEmployeeHandler,
+  GetEmployeeByIdHandler,
+  ListEmployeesHandler,
+} from './application/employee/employee.handlers';
 
 @Module({
   // Cross-context dependency, same shape as ExpenseModule's — pulling in
   // PERIOD_STATUS_PORT via the Open-Host Service (Phase 3.2), confirming
   // that seam serves a SECOND consumer cleanly, not just Expense.
   imports: [FinancialPeriodModule],
-  controllers: [PayrollRunController],
+  controllers: [PayrollRunController, EmployeeController],
   providers: [
     { provide: PAYROLL_RUN_REPOSITORY, useClass: PrismaPayrollRunRepository },
     { provide: SALARY_STRUCTURE_REPOSITORY, useClass: PrismaSalaryStructureRepository },
@@ -40,6 +49,12 @@ import { ListPayrollRunsHandler } from './application/handlers/list-payroll-runs
     CancelPayrollRunHandler,
     GetPayrollRunByIdHandler,
     ListPayrollRunsHandler,
+    CreateEmployeeHandler,
+    LinkEmployeeToUserHandler,
+    UnlinkEmployeeFromUserHandler,
+    DeactivateEmployeeHandler,
+    GetEmployeeByIdHandler,
+    ListEmployeesHandler,
   ],
   exports: [
     CreatePayrollRunHandler,
