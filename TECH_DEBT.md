@@ -473,15 +473,9 @@ original brief have no template or subscriber registration yet.
 **To close:** Additive — each new template + subscriber registration is
 independent of the others, no architectural change needed to add more.
 
-### 33. No delivery-tracking API — `NotificationLog` exists but nothing reads it
-**Where:** `NotificationLog` (Prisma model)
-**What:** Every send attempt is recorded (`pending`/`sent`/`failed`, with
-error detail), but no endpoint exposes this — no way for an admin to see
-"did this user's approval email actually arrive" without querying the DB
-directly. Mirrors the same gap ImportJob's `/errors` endpoint solves for
-CSV import, just not built for notifications yet.
-**To close:** A small `GET /notifications` (or scoped to a specific
-recipient/entity) endpoint, same shape as the import-errors endpoint.
+### 33. ~~No delivery-tracking API — `NotificationLog` exists but nothing reads it~~ — RESOLVED
+`GET /notifications` (filterable by status) and `GET /notifications/:id`
+added, gated behind the new `notification:manage` permission.
 
 ### 34. `NotificationProcessor` had no operational logging — retries were invisible
 **Where:** `NotificationProcessor.process()`
@@ -496,30 +490,14 @@ silent `notification_logs` DB rows.
 failure, explicitly flagging the terminal "PERMANENTLY FAILED, no more
 retries" case.
 
-### 35. A permanently-failed notification has no recovery path
-**Where:** `NotificationProcessor` / `NotificationsModule`'s BullMQ config
-**What:** `attempts: 3` with exponential backoff means the ENTIRE retry
-window is roughly 6-8 seconds, not minutes — confirmed via manual testing
-(stopping Mailpit, approving an expense, restarting Mailpit ~35 minutes
-later: the original notification was already permanently failed within
-seconds of the first attempt and was never retried again, despite Mailpit
-being back up long before any human would plausibly notice). Once BullMQ
-exhausts `attempts`, that notification is gone — no dead-letter queue for
-notifications specifically, no manual "retry this failed notification"
-endpoint, nothing except noticing a `status: 'failed'` row in
-`notification_logs` by querying the DB directly.
-**Why acceptable so far:** Notifications are informational (a person still
-sees their expense's real status via the API/UI regardless of whether an
-email arrived) — losing one isn't a data-integrity problem the way losing
-an audit entry or a payment would be. But it's still a real gap for a
-"production-grade" claim, especially for a genuinely extended outage.
-**To close:** Either (a) increase `attempts` with longer backoff for
-notifications specifically (a real SMTP/email-provider outage lasting
-minutes-to-hours is plausible), and/or (b) add a manual
-`POST /notifications/:id/retry` endpoint (admin-only) that re-enqueues a
-permanently-failed `NotificationLog` row — same DLQ-recovery pattern
-already built for CSV import's per-row failures, just not yet extended to
-this subsystem.
+### 35. ~~A permanently-failed notification has no recovery path~~ — RESOLVED
+`POST /notifications/:id/retry` added — validates the target is genuinely
+`failed` (not `pending`/`sent`), re-enqueues a fresh BullMQ job using the
+original recipient/template/data (now persisted on `NotificationLog` via
+the new `templateData` column). Verified end-to-end: stopped Mailpit,
+triggered a permanent failure, restarted Mailpit, manually retried via the
+new endpoint, confirmed the email actually arrived — the exact recovery
+path that didn't exist before.
 
 ---
 
@@ -564,24 +542,12 @@ chain of issues, each masking the next:
 All 5 issues confirmed resolved: 31/31 e2e tests passing, 146/146 unit
 tests passing, `npm run build` clean.
 
-### 37. `cleanE2eDatabase()`'s table list still requires manual maintenance
-**Where:** `test/integration/setup/db-helper.ts`,
-`test/e2e/setup/e2e-db-helper.ts`
-**What:** Item #36's point 3 got patched, but the underlying risk is
-unchanged — the table list is still a hardcoded array that silently falls
-out of sync every time a new table is added, exactly as it already did
-once. The original design comment reasoned this was deliberate (avoid
-silently including new tables without an explicit decision) — but in
-practice, "explicit decision" has meant "gets forgotten," twice now if you
-count the original build and this incident.
-**To close:** Switch to dynamically querying
-`information_schema.tables` (filtered to exclude Prisma's own
-`_prisma_migrations`) and truncating everything found, rather than a
-hardcoded list — trading "must remember to update a list" for "always
-truncates whatever actually exists," which is the safer default for test
-cleanup specifically (a stale test fixture leaking into another test is a
-worse failure mode than accidentally truncating a table that didn't need
-it in a throwaway test database).
+### 37. ~~`cleanE2eDatabase()`'s table list still requires manual maintenance~~ — RESOLVED
+Both `cleanDatabase()` (integration) and `cleanE2eDatabase()` (e2e) now
+discover tables dynamically via `pg_tables` instead of a hardcoded array,
+cached per test file. A new table added in any future piece gets cleaned
+automatically — no more silent drift, closing the exact failure mode that
+already happened once (TECH_DEBT #36).
 
 ### 38. Async attachment scan jobs can race against e2e test cleanup
 **Where:** e2e test teardown/setup boundary, `AttachmentScanProcessor`
@@ -602,4 +568,79 @@ currently justify the added test complexity.
 
 ---
 
-*Last updated: 2026-08-11, after resolving the ClamAV integration wiring bugs.*
+## Reference Data
+
+### 39. ~~`isActive` on Department/Vendor/Category/Project is not enforced at expense-creation time~~ — RESOLVED
+`CreateExpenseHandler` now validates department/category (required) and
+vendor/project (when provided) exist and are active BEFORE entering the
+transaction — also closes a related, previously-unflagged gap: the handler
+never validated these IDs at all before, relying entirely on the DB's FK
+constraint (which would have surfaced as a raw Prisma error, not a clean
+domain error). `ImportRecordMapper` gets the same treatment, with one
+deliberate asymmetry: a CSV import matching a deactivated VENDOR
+reactivates it (vendors are the least strictly governed type), while
+department/category stay hard-blocked until explicitly reactivated via the
+reference-data API. `CreateExpenseHandler` had no unit test file at all
+before this fix — added one.
+
+---
+
+## Authorization
+
+### 40. `PermissionGuard` returned generic `ForbiddenException`s instead of specific ones — fixed
+**Where:** `src/auth/authorization/permission.guard.ts`
+**What:** NestJS wraps a guard's `return false` in a generic
+`ForbiddenException('Forbidden resource')` automatically — every actual
+permission/scope denial in this app (as opposed to the "not authenticated"
+and "resource not found" paths, which already threw specific exceptions)
+has surfaced this way since TECH_DEBT #3 was closed, silently, across the
+whole build. Discovered when a real 403 (missing seed data for a newly
+added permission) gave no actionable information.
+**Status:** Fixed — every denial branch now throws a specific
+`ForbiddenException` naming the missing permission, the user's actual
+roles, or which scope (own/department) they're limited to. Verified: a
+denied request now returns `"None of your roles (employee) grant the
+'reference-data:manage' permission"` instead of `"Forbidden resource"`.
+Full unit + e2e suite reconfirmed green after the change.
+
+---
+
+## Payroll / Notifications
+
+### 41. `Employee` and `User` had no relationship — discovered while building per-employee notifications
+**Where:** Prisma schema
+**What:** `Employee` (payroll/salary data) and `User` (login/auth) were
+built as genuinely separate concepts across separate contexts, correctly
+per DDD boundaries — but nothing ever linked them, because nothing before
+this needed to. `GetPayrollRunByIdHandler` only ever returned raw
+`employeeId`, never resolving a login identity from it. Discovered
+concretely: building "notify each employee their payslip is ready"
+required resolving an employee → their email, and there was no path to do
+that at all.
+**Status:** Fixed — added nullable `Employee.userId` (unique FK to `User`).
+Nullable is deliberate, not a placeholder: an `Employee` can legitimately
+exist for payroll purposes without ever having platform login access
+(e.g. a contractor paid via payroll who was never given system access).
+
+### 42. No admin API exists to link/unlink an `Employee` to a `User`
+**Where:** N/A — the linkage from item #41 is currently seed-only
+**What:** `Employee.userId` can be set in seed fixtures, but there's no
+endpoint for a payroll admin to link a real employee's payroll record to
+their login account (or unlink one) after the fact. Every real employee
+onboarded through the actual product would need this.
+**To close:** A small `PATCH /employees/:id/link-user` (or similar)
+endpoint, permission-gated the same way reference-data management is
+(`payroll:create` or a new dedicated permission) — no `EmployeeController`
+exists yet at all, since employees have so far only ever been created via
+seed data, never through a real API.
+
+### 31. ~~`PayrollRunApproved` notifies the payroll admin only, not each employee~~ — RESOLVED
+`NotificationSubscriber` now enqueues one `PayslipReady` notification per
+payslip (in addition to the existing admin-facing `PayrollRunApproved`
+notification), resolved via the new `Employee.userId` link from item #41.
+Employees with no linked `User` account are correctly skipped (logged at
+debug, not an error) rather than causing a failure.
+
+---
+
+*Last updated: 2026-08-13, after linking Employee to User and completing per-employee payroll notifications.*
