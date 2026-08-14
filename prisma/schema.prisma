@@ -361,6 +361,7 @@ model Employee {
   organizationId String   @map("organization_id")
   fullName       String   @map("full_name")
   userId         String?  @unique @map("user_id") // NEW — nullable: an Employee can exist for payroll purposes without ever having platform login access (e.g. a contractor paid via payroll but never given system access)
+  isActive       Boolean  @default(true) @map("is_active")
   createdAt      DateTime @default(now()) @map("created_at")
 
   user             User?             @relation(fields: [userId], references: [id])
