@@ -1,7 +1,8 @@
 // src/reference-data/domain/reference-data.events.ts
 import { DomainEvent } from '../../shared-kernel/events/domain-event';
 
-export type ReferenceDataType = 'Department' | 'Vendor' | 'ExpenseCategory' | 'Project';
+export type ReferenceDataType =
+  'Department' | 'Vendor' | 'ExpenseCategory' | 'Project' | 'Employee';
 
 export function referenceDataCreated(
   type: ReferenceDataType,
