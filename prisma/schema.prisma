@@ -140,6 +140,7 @@ model User {
   id           String   @id @default(uuid())
   email        String   @unique
   passwordHash String   @map("password_hash")
+  employee Employee?
   createdAt    DateTime @default(now()) @map("created_at")
 
   closedPeriods    FinancialPeriod[] @relation("PeriodClosedBy")
@@ -359,8 +360,10 @@ model Employee {
   id             String   @id @default(uuid())
   organizationId String   @map("organization_id")
   fullName       String   @map("full_name")
+  userId         String?  @unique @map("user_id") // NEW — nullable: an Employee can exist for payroll purposes without ever having platform login access (e.g. a contractor paid via payroll but never given system access)
   createdAt      DateTime @default(now()) @map("created_at")
 
+  user             User?             @relation(fields: [userId], references: [id])
   salaryStructures SalaryStructure[]
   payslips         Payslip[]
 
