@@ -5,6 +5,7 @@
 .windsurf
 .env
 docs/architecture.md
+example.data.txt
 
 # .gitignore
 node_modules/
