@@ -38,7 +38,15 @@ export const envSchema = z.object({
   FIELD_ENCRYPTION_MASTER_KEY: z
     .string()
     .min(44, 'FIELD_ENCRYPTION_MASTER_KEY must be a base64-encoded 32-byte key'),
+
+  CLAMAV_HOST: z.string().default('localhost'),
+  CLAMAV_PORT: z.coerce.number().int().positive().default(3310),
+
   OTEL_METRICS_PORT: z.coerce.number().int().positive().default(9464),
+
+  SMTP_HOST: z.string().default('localhost'),
+  SMTP_PORT: z.coerce.number().int().positive().default(1025),
+  SMTP_FROM: z.string().default('noreply@ratel-plus.com'),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;
