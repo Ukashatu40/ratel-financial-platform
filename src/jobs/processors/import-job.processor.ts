@@ -45,8 +45,11 @@ export class ImportJobProcessor extends WorkerHost {
 
     let rows;
     try {
-      const buffer = await this.storage.download(importJob.storageKey); // was: importJob.rawContent directly
-      rows = this.csvAdapter.parse(buffer.toString('utf8'));
+      const buffer = await this.storage.download(importJob.storageKey);
+      rows = this.csvAdapter.parse(
+        buffer.toString('utf8'),
+        importJob.resolvedMapping as Record<string, string> | undefined, // NEW — undefined preserves the fixed-header fallback exactly
+      );
     } catch (err) {
       await this.prisma.importJob.update({
         where: { id: importJobId },

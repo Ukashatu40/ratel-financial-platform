@@ -6,6 +6,10 @@ import { CsvProviderAdapter } from './adapters/csv/csv-provider.adapter';
 import { CsvNormalizer } from './normalizers/csv-normalizer';
 import { InboxService } from './inbox/inbox.service';
 import { ImportRecordMapper } from './acl/import-record-mapper';
+import {
+  SaveColumnMappingHandler,
+  ListColumnMappingsHandler,
+} from './application/column-mapping/column-mapping.handlers';
 import { ImportController } from './presentation/controllers/import.controller';
 import { ImportJobProcessor } from '../jobs/processors/import-job.processor';
 import { IMPORT_JOB_QUEUE } from '../jobs/queues/import-job.queue';
@@ -19,6 +23,8 @@ import { IMPORT_JOB_QUEUE } from '../jobs/queues/import-job.queue';
     InboxService,
     ImportRecordMapper,
     ImportJobProcessor,
+    SaveColumnMappingHandler,
+    ListColumnMappingsHandler,
   ],
 })
 export class IntegrationModule {}
