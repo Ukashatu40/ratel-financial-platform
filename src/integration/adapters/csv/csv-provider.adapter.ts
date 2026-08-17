@@ -12,6 +12,24 @@ export interface CsvRow {
   description?: string;
 }
 
+export type CanonicalCsvField =
+  | 'department'
+  | 'category'
+  | 'vendor'
+  | 'amountMinorUnits'
+  | 'currency'
+  | 'expenseDate'
+  | 'description';
+export type ColumnMappingConfig = Partial<Record<CanonicalCsvField, string>>; // canonical field -> source column header
+
+const REQUIRED_FIELDS: CanonicalCsvField[] = [
+  'department',
+  'category',
+  'amountMinorUnits',
+  'currency',
+  'expenseDate',
+];
+
 export class CsvParseError extends Error {
   constructor(message: string) {
     super(message);
@@ -19,46 +37,66 @@ export class CsvParseError extends Error {
   }
 }
 
-/**
- * v1 uses a FIXED expected header schema (documented below), not
- * user-configurable column mapping — Phase 8.2 originally envisioned
- * per-upload configurable mapping (users have different spreadsheet
- * layouts); that's real, separate scope, deferred and tracked rather than
- * half-built here.
- *
- * Expected headers: department,category,vendor,amountMinorUnits,currency,expenseDate,description
- * (vendor and description are optional columns)
- */
 @Injectable()
 export class CsvProviderAdapter {
   readonly providerId = 'csv-upload';
 
-  parse(rawContent: string): CsvRow[] {
-    const result = Papa.parse<CsvRow>(rawContent, {
+  /**
+   * Without a mapping: requires the exact canonical header set (unchanged
+   * behavior from before this piece — nothing breaks for existing callers).
+   * With a mapping: accepts ANY header names, remapping each row's keys
+   * from the source header to the canonical field name BEFORE returning —
+   * this is what lets CsvNormalizer stay completely unaware that mapping
+   * even exists, since it always receives canonically-shaped rows either way.
+   */
+  parse(rawContent: string, mapping?: ColumnMappingConfig): CsvRow[] {
+    const result = Papa.parse<Record<string, string>>(rawContent, {
       header: true,
       skipEmptyLines: true,
       transformHeader: (h) => h.trim(),
     });
 
-    if (result.errors.length > 0) {
+    const fatalErrors = result.errors.filter((e) => e.type !== 'Delimiter');
+    if (fatalErrors.length > 0) {
       throw new CsvParseError(
-        `CSV parse failed at row ${result.errors[0].row}: ${result.errors[0].message}`,
+        `CSV parse failed at row ${fatalErrors[0].row}: ${fatalErrors[0].message}`,
       );
     }
 
-    const requiredHeaders = [
-      'department',
-      'category',
-      'amountMinorUnits',
-      'currency',
-      'expenseDate',
-    ];
     const actualHeaders = result.meta.fields ?? [];
-    const missing = requiredHeaders.filter((h) => !actualHeaders.includes(h));
-    if (missing.length > 0) {
-      throw new CsvParseError(`Missing required column(s): ${missing.join(', ')}`);
+
+    if (mapping) {
+      const missingRequired = REQUIRED_FIELDS.filter((f) => !mapping[f]);
+      if (missingRequired.length > 0) {
+        throw new CsvParseError(
+          `Column mapping is missing required field(s): ${missingRequired.join(', ')}`,
+        );
+      }
+
+      for (const [canonical, sourceHeader] of Object.entries(mapping)) {
+        if (sourceHeader && !actualHeaders.includes(sourceHeader)) {
+          throw new CsvParseError(
+            `Mapped column "${sourceHeader}" (for "${canonical}") was not found in the uploaded file. File headers: ${actualHeaders.join(', ')}`,
+          );
+        }
+      }
+
+      return result.data.map((row) => {
+        const remapped: Record<string, string> = {};
+        (Object.keys(mapping) as CanonicalCsvField[]).forEach((canonical) => {
+          const sourceHeader = mapping[canonical];
+          if (sourceHeader) remapped[canonical] = row[sourceHeader];
+        });
+        return remapped as unknown as CsvRow;
+      });
     }
 
-    return result.data;
+    const missing = REQUIRED_FIELDS.filter((h) => !actualHeaders.includes(h));
+    if (missing.length > 0) {
+      throw new CsvParseError(
+        `Missing required column(s): ${missing.join(', ')}. Save a column mapping if your file uses different header names.`,
+      );
+    }
+    return result.data as unknown as CsvRow[];
   }
 }
