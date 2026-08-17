@@ -456,6 +456,7 @@ model AuditLogEntry {
 
   @@index([entityType, entityId])
   @@index([correlationId])
+  @@index([organizationId, createdAt]) // NEW — supports the per-org chain-walk query
   @@map("audit_log_entries")
 }
 
