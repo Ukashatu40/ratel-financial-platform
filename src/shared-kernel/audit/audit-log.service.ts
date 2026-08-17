@@ -26,23 +26,23 @@ export class AuditLogService {
 
   async record(input: RecordAuditEntryInput): Promise<void> {
     await this.uow.transaction(async (tx) => {
-      /**
-       * Postgres advisory lock, scoped to this transaction (pg_advisory_xact_lock
-       * auto-releases at commit/rollback, unlike the session-scoped variant —
-       * no manual unlock needed, and it can't leak across requests). This
-       * serializes every concurrent call to record() globally: a second
-       * transaction attempting the same lock blocks here until the first
-       * commits, which is exactly what closes the read-then-insert race from
-       * TECH_DEBT #7 — no two entries can ever read the same prevHash again.
-       *
-       * hashtext('audit_log_chain') turns the fixed string into the bigint
-       * key the lock function expects — a standard Postgres idiom for
-       * advisory locks keyed by a stable name rather than a numeric constant
-       * that has no inherent meaning on its own.
-       */
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('audit_log_chain'))`;
+      // Lock key now includes organizationId — two DIFFERENT organizations
+      // writing audit entries concurrently no longer serialize against
+      // each other at all (previously the single global key would have
+      // made every org's writes queue behind one another unnecessarily,
+      // even though their chains were about to become independent below).
+      const lockKey = `audit_log_chain:${input.organizationId}`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`;
 
-      const last = await tx.auditLogEntry.findFirst({ orderBy: { createdAt: 'desc' } });
+      // Scoped to THIS organization's chain only — this is the actual fix.
+      // Before: walked the latest entry across every organization. Now:
+      // walks the latest entry for the specific org being audited, so
+      // proving chain integrity to one org's auditor never requires
+      // exposing that other orgs' events shared the same sequence.
+      const last = await tx.auditLogEntry.findFirst({
+        where: { organizationId: input.organizationId },
+        orderBy: { createdAt: 'desc' },
+      });
       const prevHash = last?.entryHash ?? GENESIS_HASH;
       const createdAt = new Date();
 
