@@ -83,4 +83,54 @@ describe('AuditLogService (integration) — hash-chain atomicity under concurren
     expect(entries).toHaveLength(1);
     expect(entries[0].prevHash).toBe(GENESIS_HASH);
   });
+
+  it('two organizations writing concurrently produce two completely independent chains', async () => {
+    const buildEntry = (org: string, i: number) => ({
+      organizationId: org,
+      entityType: 'Expense',
+      entityId: `${org}-exp-${i}`,
+      action: 'ExpenseDrafted',
+      actorUserId: 'user-1',
+      newValue: { index: i },
+      correlationId: `${org}-corr-${i}`,
+      source: 'api',
+    });
+
+    // Interleaved concurrent writes across TWO organizations — if the
+    // per-org scoping in #7b's fix has any gap, this is exactly the
+    // scenario that would produce a broken or cross-contaminated chain.
+    const writes = [
+      ...Array.from({ length: 10 }, (_, i) => service.record(buildEntry('org-A', i))),
+      ...Array.from({ length: 10 }, (_, i) => service.record(buildEntry('org-B', i))),
+    ];
+    await Promise.all(writes);
+
+    const orgAEntries = await prisma.auditLogEntry.findMany({
+      where: { organizationId: 'org-A' },
+      orderBy: { createdAt: 'asc' },
+    });
+    const orgBEntries = await prisma.auditLogEntry.findMany({
+      where: { organizationId: 'org-B' },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    expect(orgAEntries).toHaveLength(10);
+    expect(orgBEntries).toHaveLength(10);
+
+    // Each org's chain must be internally unbroken, independently...
+    expect(orgAEntries[0].prevHash).toBe(GENESIS_HASH);
+    for (let i = 1; i < orgAEntries.length; i++)
+      expect(orgAEntries[i].prevHash).toBe(orgAEntries[i - 1].entryHash);
+
+    expect(orgBEntries[0].prevHash).toBe(GENESIS_HASH);
+    for (let i = 1; i < orgBEntries.length; i++)
+      expect(orgBEntries[i].prevHash).toBe(orgBEntries[i - 1].entryHash);
+
+    // ...and neither chain's hashes appear anywhere in the OTHER org's
+    // chain — the actual disclosure concern TECH_DEBT #7b was about.
+    const orgAHashes = new Set(orgAEntries.map((e) => e.entryHash));
+    const orgBHashes = new Set(orgBEntries.map((e) => e.entryHash));
+    const overlap = [...orgAHashes].filter((h) => orgBHashes.has(h));
+    expect(overlap).toHaveLength(0);
+  });
 });
