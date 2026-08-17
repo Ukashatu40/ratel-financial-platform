@@ -500,6 +500,8 @@ model ImportJob {
   createdAt      DateTime        @default(now()) @map("created_at")
   completedAt    DateTime?       @map("completed_at")
 
+  resolvedMapping Json? @map("resolved_mapping") // NEW — null means "use default canonical headers" (today's behavior, unchanged)
+
   failedRecords FailedImportRecord[]
 
   @@index([organizationId, status])
@@ -558,4 +560,15 @@ model NotificationLog {
   @@index([recipientUserId])
   @@index([organizationId, status])
   @@map("notification_logs")
+}
+
+model ColumnMapping {
+  id             String   @id @default(uuid())
+  organizationId String   @map("organization_id")
+  name           String
+  mapping        Json     // { department: "Dept", category: "Cost Category", amountMinorUnits: "Amount", ... }
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@unique([organizationId, name])
+  @@map("column_mappings")
 }
