@@ -3,6 +3,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { EncryptedEnvelope, EncryptionService } from './encryption.port';
 import { EnvConfig } from '../../config/env.schema';
+import { requireConfig } from '../../config/require-config';
 import {
   decryptEnvelope,
   decryptJson,
@@ -16,7 +17,7 @@ export class AesGcmEnvelopeEncryptionService implements EncryptionService {
   private readonly kek: Buffer;
 
   constructor(@Inject(ConfigService) config: ConfigService<EnvConfig>) {
-    this.kek = loadKekFromBase64(config.get('FIELD_ENCRYPTION_MASTER_KEY', { infer: true })!);
+    this.kek = loadKekFromBase64(requireConfig(config, 'FIELD_ENCRYPTION_MASTER_KEY'));
   }
 
   async encrypt(plaintext: Buffer): Promise<EncryptedEnvelope> {
