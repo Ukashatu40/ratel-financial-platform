@@ -173,7 +173,7 @@ chosen, per the original blueprint's `jobs/processors/` design.
 
 ---
 
-### 19. Prisma 7 requires driver adapters; every raw `pg.Pool` needs an `error` listener
+### 19. Prisma 7 driver adapters + `pg.Pool` error listeners — reference; actionable part RESOLVED
 **Where:** `src/prisma/prisma.service.ts`, `prisma/seed/seed.ts`,
 `test/integration/setup/db-helper.ts` — anywhere a `PrismaClient` is
 constructed.
@@ -197,17 +197,15 @@ fixed with a `pool.on('error', ...)` listener at the point this was
 discovered, and the e2e suite (login → create → submit → approve, plus
 audit trail verification) now passes cleanly end-to-end against real
 Postgres + Redis containers, confirming the pattern works.
-**To close:** `PrismaService`'s `pool.on('error', ...)` handler currently
-mirrors the TEST harness's pattern exactly (silently swallowing
-`'terminating connection'`/`57P01` with no log at all) — this is the wrong
-choice for production code specifically. A live connection termination is
-meaningful operational signal (DB restart, network partition, pool
-exhaustion, ops action) that should always be logged, just at a lower
-severity for this expected-during-restart case vs. `error` severity for
-anything else. The test harness's silent-swallow is fine because we
-control exactly why/when it fires there; `PrismaService` needs the same
-listener structure but with logging retained for every branch, never a
-fully silent case.
+**Status:** The documentation above stays — both facts are still load-bearing
+for anyone constructing a `PrismaClient` or a `pg.Pool` in this codebase, and
+CLAUDE.md's gotchas #1/#2 point here. The one actionable part is **RESOLVED**:
+`PrismaService`'s `pool.on('error', ...)` no longer mirrors the test harness's
+silent swallow. It branches on `'terminating connection'`/`57P01` and logs
+`warn` for that expected-during-restart case, `error` (with stack) for
+anything else — every branch logged, no silent case, which is the distinction
+this item was about. The test harness keeps its swallow, which is still
+correct there because we control exactly when and why the DB goes away.
 
 ### 20. ~~No `GET` endpoints exist on `ExpenseController` or `PayrollRunController`~~ — RESOLVED
 Built `GET /:id` and `GET /` (cursor-paginated) for both controllers.
@@ -382,42 +380,45 @@ concern of blindly trusting client-declared file type.
 
 ## Object Storage
 
-### 26. No real virus scanning — attachments default to "unscanned," not actually checked
-**Where:** `AttachFileHandler`, `Attachment.scanStatus`
-**What:** Phase 9.7 specified secure file uploads with virus scanning
-(ClamAV or a hosted scanning service) before a file becomes visible/
-downloadable. This build persists every upload with `scanStatus: 'unscanned'`
-and does NOT run any actual scan, nor does anything gate download access
-on scan status — an infected file uploaded today would be immediately
-downloadable by anyone with view access to the expense.
-**Why acceptable so far:** No scanning integration exists anywhere in this
-codebase; being honest about that via an explicit `unscanned` status
-(rather than a misleading `clean` default) was the deliberate choice made
-when this schema was designed — better to visibly under-deliver than to
-silently claim a security control that doesn't exist.
-**To close:** Integrate ClamAV (or a hosted equivalent) as an async
-post-upload step (a BullMQ job, matching the pattern already used for
-outbox dispatch and CSV import), transitioning `scanStatus` from
-`unscanned` to `clean`/`infected`, and gate the download-URL endpoint to
-refuse `infected` files.
+### 26. ~~No real virus scanning — attachments default to "unscanned," not actually checked~~ — RESOLVED
+ClamAV is integrated as an async post-upload BullMQ job, matching the
+pattern already used for outbox dispatch and CSV import:
+`AttachFileHandler` enqueues `attachment-scan` after persisting the row,
+`AttachmentScanProcessor` downloads the object, scans it via a new
+`VirusScanPort`/`ClamAvScanAdapter`, and transitions `scanStatus` to
+`clean`/`infected`. A scan that throws is re-thrown so BullMQ retries,
+leaving `scanStatus: 'unscanned'` in the meantime — which still blocks
+download, so a transient scanner outage fails closed rather than open.
 
-### 27. `S3ObjectStorageAdapter` lazily validates config — silent gap in test coverage, not just prod
+Download gating ended up *stricter* than this item asked for:
+`GetAttachmentDownloadUrlHandler` refuses anything where `scanStatus !==
+'clean'`, not just `infected`, so a file that has not finished scanning yet
+is also refused (via `AttachmentNotSafeToDownloadError`, a `DomainError` →
+409) rather than being downloadable during the scan window.
+
+Verified end-to-end against a real ClamAV container in the e2e harness: an
+uploaded EICAR test file is detected as `infected` and its download is
+refused. The chain of wiring bugs this integration surfaced is recorded
+separately as #36.
+
+### 27. `S3ObjectStorageAdapter` still lazily validates config — the test-coverage half is now closed
 **Where:** `S3ObjectStorageAdapter.getClient()`
-**What:** Object storage config (`OBJECT_STORAGE_*`) is validated only on
-first actual use, not at app boot, specifically so the app (and existing
-e2e suites that don't touch attachments) keep working without a MinIO
-container. This means: (a) a genuinely missing/misconfigured production
-config wouldn't be caught until the first real upload attempt, not at
-deploy time, and (b) this whole piece has ZERO integration or e2e test
-coverage against a real MinIO container — consistent with several other
-pieces in this build (Reporting, CSV import) that were verified manually
-via `curl` first, with automated coverage as a deliberate follow-up
-decision, not an oversight.
-**To close:** Add a MinIO Testcontainers module to the integration/e2e
-harnesses (same pattern as Postgres/Redis), and add a startup health-check
-(not necessarily `validateEnv`'s hard-fail, since object storage isn't
-needed for every deployment) that at least logs a warning if
-`OBJECT_STORAGE_*` is unset.
+**What:** Originally two gaps in one entry. The second is now closed: a
+MinIO Testcontainers module is wired into the e2e harness (same pattern as
+Postgres/Redis), and `attachments.e2e.spec.ts` exercises upload, scan and
+download against a real MinIO container, so this piece is no longer
+untested.
+**Still open:** object storage config (`OBJECT_STORAGE_*`) is validated
+only on first actual use, inside `getClient()`, not at app boot. A
+genuinely missing or misconfigured production config still wouldn't surface
+until the first real upload attempt rather than at deploy time.
+**Why acceptable so far:** The lazy check is deliberate — it lets the app,
+and every e2e suite that doesn't touch attachments, boot without a MinIO
+container at all. A hard-fail at boot would couple every deployment to
+object storage being configured, which isn't true for every deployment.
+**To close:** A startup log warning (not `validateEnv`'s hard-fail) when
+`OBJECT_STORAGE_*` is unset — enough to make a misconfiguration visible at
+deploy time without making storage a boot dependency.
 
 ## Testing Infrastructure
 
@@ -501,7 +502,7 @@ independent of the others, no architectural change needed to add more.
 `GET /notifications` (filterable by status) and `GET /notifications/:id`
 added, gated behind the new `notification:manage` permission.
 
-### 34. `NotificationProcessor` had no operational logging — retries were invisible
+### 34. ~~`NotificationProcessor` had no operational logging — retries were invisible~~ — RESOLVED
 **Where:** `NotificationProcessor.process()`
 **What:** Every other BullMQ processor in this codebase
 (`OutboxDispatchProcessor`, `ImportJobProcessor`) logs its outcome per run.
@@ -527,7 +528,7 @@ path that didn't exist before.
 
 ## Virus Scanning (ClamAV) — Wiring Bugs Found & Fixed
 
-### 36. Multiple e2e-breaking bugs surfaced while adding real virus scanning — all resolved
+### 36. ~~Multiple e2e-breaking bugs surfaced while adding real virus scanning~~ — RESOLVED
 **What happened:** Adding ClamAV integration (closing item #26) triggered a
 chain of issues, each masking the next:
 1. `StorageModule` registered the `attachment-scan` BullMQ queue via
@@ -611,7 +612,7 @@ before this fix — added one.
 
 ## Authorization
 
-### 40. `PermissionGuard` returned generic `ForbiddenException`s instead of specific ones — fixed
+### 40. ~~`PermissionGuard` returned generic `ForbiddenException`s instead of specific ones~~ — RESOLVED
 **Where:** `src/auth/authorization/permission.guard.ts`
 **What:** NestJS wraps a guard's `return false` in a generic
 `ForbiddenException('Forbidden resource')` automatically — every actual
@@ -631,7 +632,7 @@ Full unit + e2e suite reconfirmed green after the change.
 
 ## Payroll / Notifications
 
-### 41. `Employee` and `User` had no relationship — discovered while building per-employee notifications
+### 41. ~~`Employee` and `User` had no relationship~~ — RESOLVED
 **Where:** Prisma schema
 **What:** `Employee` (payroll/salary data) and `User` (login/auth) were
 built as genuinely separate concepts across separate contexts, correctly
@@ -646,17 +647,15 @@ Nullable is deliberate, not a placeholder: an `Employee` can legitimately
 exist for payroll purposes without ever having platform login access
 (e.g. a contractor paid via payroll who was never given system access).
 
-### 42. No admin API exists to link/unlink an `Employee` to a `User`
-**Where:** N/A — the linkage from item #41 is currently seed-only
-**What:** `Employee.userId` can be set in seed fixtures, but there's no
-endpoint for a payroll admin to link a real employee's payroll record to
-their login account (or unlink one) after the fact. Every real employee
-onboarded through the actual product would need this.
-**To close:** A small `PATCH /employees/:id/link-user` (or similar)
-endpoint, permission-gated the same way reference-data management is
-(`payroll:create` or a new dedicated permission) — no `EmployeeController`
-exists yet at all, since employees have so far only ever been created via
-seed data, never through a real API.
+### 42. ~~No admin API exists to link/unlink an `Employee` to a `User`~~ — RESOLVED
+`EmployeeController` now exists, gated on `payroll:create` throughout, with
+`PATCH /employees/:id/link-user` and `PATCH /employees/:id/unlink-user`
+closing the specific gap this item named. Building it out properly also
+picked up the endpoints an employee record needs to be manageable at all
+rather than seed-only: `POST /employees`, `GET /employees/:id`,
+`GET /employees`, and `PATCH /employees/:id/deactivate` (soft delete, per
+critical convention #3 — employees are referenced historically by payslips
+and must never be hard-deleted).
 
 ---
 
