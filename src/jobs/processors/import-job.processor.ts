@@ -48,7 +48,12 @@ export class ImportJobProcessor extends WorkerHost {
       const buffer = await this.storage.download(importJob.storageKey);
       rows = this.csvAdapter.parse(
         buffer.toString('utf8'),
-        importJob.resolvedMapping as Record<string, string> | undefined, // NEW — undefined preserves the fixed-header fallback exactly
+        // Prisma returns `null` (not `undefined`) for an unset JSON column, so
+        // normalize explicitly. The adapter only tests truthiness today, but
+        // relying on that would leave a trap for anyone who later tightens it
+        // to `!== undefined` — at which point `null` would silently take the
+        // mapping path.
+        (importJob.resolvedMapping as Record<string, string> | null) ?? undefined,
       );
     } catch (err) {
       await this.prisma.importJob.update({
