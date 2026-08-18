@@ -7,6 +7,12 @@ import { OBJECT_STORAGE_PORT, ObjectStoragePort } from '../../../../storage/obje
 import { DomainError, EntityNotFoundError } from '../../../../shared-kernel/errors/domain-error';
 import { EXPENSE_REPOSITORY, ExpenseRepository } from '../../domain/ports/expense-repository.port';
 import { AttachFileCommand } from '../commands/attach-file.command';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
+import {
+  ATTACHMENT_SCAN_JOB,
+  ATTACHMENT_SCAN_QUEUE,
+} from '../../../../jobs/queues/attachment-scan.queue';
 
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10MB
 const ALLOWED_CONTENT_TYPES = ['application/pdf', 'image/jpeg', 'image/png'];
@@ -39,6 +45,7 @@ export class AttachFileHandler implements CommandHandler<
   constructor(
     @Inject(EXPENSE_REPOSITORY) private readonly expenseRepo: ExpenseRepository,
     @Inject(OBJECT_STORAGE_PORT) private readonly storage: ObjectStoragePort,
+    @InjectQueue(ATTACHMENT_SCAN_QUEUE) private readonly scanQueue: Queue,
     private readonly prisma: PrismaService,
   ) {}
 
@@ -72,6 +79,8 @@ export class AttachFileHandler implements CommandHandler<
         scanStatus: 'unscanned', // honest default — no real scanner wired up (TECH_DEBT)
       },
     });
+
+    await this.scanQueue.add(ATTACHMENT_SCAN_JOB, { attachmentId });
 
     return { attachmentId };
   }

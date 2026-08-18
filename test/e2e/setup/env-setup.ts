@@ -28,3 +28,5 @@ process.env.OBJECT_STORAGE_ENDPOINT = state.minioEndpoint;
 process.env.OBJECT_STORAGE_BUCKET = 'e2e-test-attachments';
 process.env.OBJECT_STORAGE_ACCESS_KEY = state.minioAccessKey;
 process.env.OBJECT_STORAGE_SECRET_KEY = state.minioSecretKey;
+process.env.CLAMAV_HOST = state.clamavHost;
+process.env.CLAMAV_PORT = String(state.clamavPort);

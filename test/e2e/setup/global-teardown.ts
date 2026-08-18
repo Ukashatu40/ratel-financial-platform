@@ -8,11 +8,11 @@ const STATE_FILE = join(__dirname, '.e2e-state.json');
 export default async function globalTeardown(): Promise<void> {
   if (!existsSync(STATE_FILE)) return;
 
-  const { postgresContainerId, redisContainerId, minioContainerId } = JSON.parse(
+  const { postgresContainerId, redisContainerId, minioContainerId, clamavContainerId } = JSON.parse(
     readFileSync(STATE_FILE, 'utf8'),
   );
 
-  for (const id of [postgresContainerId, redisContainerId, minioContainerId]) {
+  for (const id of [postgresContainerId, redisContainerId, minioContainerId, clamavContainerId]) {
     try {
       execSync(`docker stop ${id}`, { stdio: 'inherit' });
     } catch (err) {
