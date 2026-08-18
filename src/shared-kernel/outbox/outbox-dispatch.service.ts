@@ -59,11 +59,25 @@ export class OutboxDispatchService {
         // here too, but wasn't built into this v1.
         await this.dispatcher.dispatch(event);
 
-        await this.prisma.outboxEvent.update({
-          where: { id: row.id },
+        // updateMany + WHERE status:'pending' instead of update-by-id:
+        // if the row was deleted or already dispatched between the SELECT
+        // above and this call (a real race — data retention, a second
+        // dispatcher instance, or just test cleanup racing a live
+        // background poller), this simply affects 0 rows rather than
+        // throwing P2025. That's the correct outcome — "already handled
+        // or gone" isn't a dispatch failure worth an ERROR log.
+        const result = await this.prisma.outboxEvent.updateMany({
+          where: { id: row.id, status: 'pending' },
           data: { status: 'dispatched', dispatchedAt: new Date() },
         });
-        dispatched++;
+
+        if (result.count === 0) {
+          this.logger.debug(
+            `Outbox event ${row.id} was already handled or removed before it could be marked dispatched — skipping`,
+          );
+        } else {
+          dispatched++;
+        }
       } catch (err) {
         // dispatch() itself shouldn't throw per the above, but guarding
         // anyway — a genuinely unexpected error here leaves the row
