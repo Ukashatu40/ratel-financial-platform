@@ -112,29 +112,15 @@ produce an unbroken chain — every entry's `prevHash` matches the previous
 entry's `entryHash` exactly, and all 20 `entryHash` values are unique. This
 is the scenario that would have reliably corrupted the chain before the fix.
 
-### 7b. Audit chain is a single global sequence across all organizations, not per-organization
-**Where:** `AuditLogService.record()` — the `findFirst({ orderBy: {
-createdAt: 'desc' } })` query has no `organizationId` filter, so it walks
-the LATEST entry across every organization, not the latest entry for the
-specific org being audited.
-**What:** Discovered while fixing #7, deliberately NOT changed as part of
-that fix since it's a different concern (chain scope, not atomicity) —
-changing it would be a bigger design decision than what #7 asked for.
-Today, with only one organization (Ratel-Plus) existing, this is invisible.
-The moment a second organization exists, every organization's audit entries
-interleave into ONE shared chain — which means proving chain integrity to
-one organization's auditor would necessarily expose that other
-organizations' events participated in the same sequence, a real disclosure
-concern, not just a cosmetic one.
-**To close:** Decide deliberately whether the chain should be scoped
-per-organization (separate `prevHash` lineage per `organizationId`, likely
-the right call once multi-tenancy is real) or intentionally kept global
-(defensible only if a documented reason exists, e.g. a single shared
-compliance boundary). Whichever is chosen, the advisory lock key from #7's
-fix would need to become per-organization too
-(`hashtext('audit_log_chain:' || organizationId)`) rather than the current
-single global key, to avoid serializing unrelated organizations' writes
-against each other unnecessarily.
+### 7b. ~~Audit chain is a single global sequence across all organizations, not per-organization~~ — RESOLVED
+`AuditLogService.record()` now scopes both the chain-walk query
+(`findFirst({ where: { organizationId } })`) and the advisory lock key
+(`audit_log_chain:${organizationId}`) per organization. Verified with a
+new integration test: 20 writes interleaved across two organizations
+concurrently produce two independently unbroken chains with zero hash
+overlap between them — the actual disclosure concern this item was about.
+No backfill was needed since only one organization has ever existed to
+date, so historical data already trivially satisfies per-org ordering. 
 
 ### 8. No field-level old/new value diffing
 **Where:** `AuditSubscriber`
@@ -309,17 +295,58 @@ build and are NOT within `@nestjs/bullmq@11.0.4`'s declared peer range
 
 ## Integration Layer
 
-### 22. CSV import uses a fixed column schema, not configurable mapping
-**Where:** `src/integration/adapters/csv/csv-provider.adapter.ts`
-**What:** Phase 8.2 originally envisioned user-configurable header mapping
-(real-world spreadsheets vary in column names/order). v1 requires an exact
-fixed header set (`department,category,vendor,amountMinorUnits,currency,
-expenseDate,description`) — anything else fails the whole file at parse
-time with a clear error, but there's no mapping UI/config to adapt to a
-different layout.
-**To close:** Build a `ColumnMapping` concept (per-upload, stored config
-mapping arbitrary source headers to the canonical fields) — genuinely
-separate, larger scope from what this piece built.
+### 22. ~~CSV import uses a fixed column schema, not configurable mapping~~ — RESOLVED
+Configurable per-organization column mapping now exists end to end: a
+`ColumnMapping` model (unique per `(organizationId, name)`), `POST`/`GET
+/imports/column-mappings` to save (upsert) and list them, and
+`POST /imports?mappingId=` to import a file whose headers match nothing in
+the canonical set. `ImportJob.resolvedMapping` **snapshots** the mapping at
+upload time, so later edits to a saved mapping cannot retroactively change
+how an already-processed job was parsed. Remapping happens at the
+`CsvProviderAdapter` boundary, which keeps `CsvNormalizer` and everything
+downstream of it unaware that mapping exists at all — a mapped file and a
+canonical-header file reach the normalizer in exactly the same shape.
+
+Four gaps were found and closed while verifying this was genuinely done
+rather than only *appearing* done:
+- **No e2e coverage at all.** The capability had unit tests for the
+  remapping function but nothing exercising save → resolve-at-upload →
+  worker over real HTTP, which is this project's stated bar for a new
+  capability (as opposed to wiring). Added 9 e2e tests, including a
+  deliberate CONTROL case — the same non-canonical file uploaded WITHOUT a
+  `mappingId` must fail — so a passing import cannot be explained by
+  anything except the mapping actually being applied, plus a
+  cross-organization case asserting a `mappingId` owned by another org
+  returns 404 rather than someone else's mapping.
+- **The required-field list was duplicated** across
+  `csv-provider.adapter.ts` and an application-layer `required-fields.ts`,
+  validated independently in each — the same silent-drift risk #37 closed
+  for the test-cleanup table list. Both now import from
+  `integration/domain/canonical-csv-fields.ts`, which owns the field lists
+  and a single shared `validateColumnMappingShape()`.
+- **A bad mapping saved with a 201 and only failed later, inside the
+  worker.** `SaveColumnMappingDto` validated `@IsObject()` and nothing
+  more (NestJS's `whitelist`/`forbidNonWhitelisted` do not descend into a
+  plain-object property — confirmed by test, not assumed), and the handler
+  checked only that required keys were *present*. So `{department: 123}`,
+  `{currency: ''}`, or an entirely invented field name all persisted
+  happily and then died in `ImportJobProcessor`, where the reason reached
+  the server log and nothing else. Save-time validation now rejects
+  unknown fields, non-string/empty values, and missing required fields
+  with a specific 400. The adapter runs the same validator, so a mapping
+  written directly to the DB — or saved before this change — still fails
+  loudly instead of producing half-empty rows.
+- **`resolvedMapping` was cast to `Record<string, string> | undefined`**
+  when Prisma actually returns `null` for an unset JSON column. Behavior
+  was correct only because the adapter happens to test truthiness; anyone
+  later tightening that to `!== undefined` would have had `null` silently
+  take the mapping path. Now normalized explicitly with `?? undefined`.
+
+Also projected `GET /imports/column-mappings` through an explicit
+`ColumnMappingView` rather than returning raw Prisma rows, which were
+echoing `organizationId` back to a caller that already knows it.
+
+Two pieces were deliberately left open — see #43 and #44.
 
 ### 23. ~~Import CSV content is stored in the database, not object storage~~ — RESOLVED
 `ImportJob.rawContent TEXT` replaced with `storageKey`, pointing at the
@@ -454,15 +481,12 @@ anything. Same honest-gap discipline as `Attachment.scanStatus: 'unscanned'`.
 account/API key exists — the port abstraction means nothing else in the
 codebase needs to change.
 
-### 31. `PayrollRunApproved` notifies the payroll admin only, not each employee
-**Where:** `NotificationSubscriber.handlePayrollRunApproved()`
-**What:** The more useful notification — each employee on the payslip
-getting their own "your pay is ready" email — needs one notification job
-per payslip (resolved from `run.getPayslips`), not a single run-level
-notification. Deliberately scoped down to avoid half-building the
-per-employee version in this pass.
-**To close:** Iterate `run.getPayslips` and enqueue one notification per
-employee, with its own template (distinct from the admin-facing one).
+### 31. ~~`PayrollRunApproved` notifies the payroll admin only, not each employee~~ — RESOLVED
+`NotificationSubscriber` now enqueues one `PayslipReady` notification per
+payslip (in addition to the existing admin-facing `PayrollRunApproved`
+notification), resolved via the new `Employee.userId` link from item #41.
+Employees with no linked `User` account are correctly skipped (logged at
+debug, not an error) rather than causing a failure.
 
 ### 32. Only 3 notification templates exist, not the full original catalog
 **Where:** `src/notifications/templates/notification-templates.ts`
@@ -634,13 +658,74 @@ endpoint, permission-gated the same way reference-data management is
 exists yet at all, since employees have so far only ever been created via
 seed data, never through a real API.
 
-### 31. ~~`PayrollRunApproved` notifies the payroll admin only, not each employee~~ — RESOLVED
-`NotificationSubscriber` now enqueues one `PayslipReady` notification per
-payslip (in addition to the existing admin-facing `PayrollRunApproved`
-notification), resolved via the new `Employee.userId` link from item #41.
-Employees with no linked `User` account are correctly skipped (logged at
-debug, not an error) rather than causing a failure.
+---
+
+## Integration Layer — Column Mapping Follow-ups
+
+### 43. Saved column mappings can be created and listed, but never deleted
+**Where:** `ImportController`, `column-mapping.handlers.ts`
+**What:** `POST /imports/column-mappings` upserts by `(organizationId,
+name)` and `GET /imports/column-mappings` lists them, but there is no
+delete. A mapping saved by mistake, or for a source system no longer in
+use, stays in the picker forever. Renaming is also impossible — saving
+under a new name creates a second mapping rather than moving the old one.
+**Why acceptable so far:** Upsert-by-name means a wrong mapping can always
+be *corrected* in place (the common case) even though it can't be removed,
+and the list is scoped per organization, so clutter is bounded by how many
+distinct source formats one org actually imports from.
+**To close:** A `DELETE /imports/column-mappings/:id` gated on the same
+`expense:create` permission. Worth deciding at that point whether delete
+should be a hard delete or follow this codebase's soft-delete convention
+(critical convention #3) — `ImportJob.resolvedMapping` snapshots the
+mapping content at upload time and holds no FK to `ColumnMapping`, so no
+historical import job would be damaged by a hard delete, which is the
+usual reason that convention exists. This is the rare case where hard
+delete is probably defensible; it should be an explicit decision rather
+than an assumption either way.
+
+### 44. A whole-file import failure records no reason the API can return
+**Where:** `ImportJobProcessor.process()`, `ImportController.getStatus()`
+**What:** When a file fails to fetch or parse at all (bad mapping,
+non-CSV content, object storage unreachable), the processor sets
+`ImportJob.status = 'failed'` and logs the reason server-side — but
+persists it nowhere the API exposes. `GET /imports/:jobId` has no error
+field, and `GET /imports/:jobId/errors` returns `[]`, because a whole-file
+failure produces no `FailedImportRecord` rows (those are per-row). The
+user sees `status: "failed"` with no explanation and no way to self-serve
+a fix; the actual message is only reachable by an engineer reading logs.
+**Why acceptable so far:** Pre-existing since the import pipeline was
+built, not introduced by the column-mapping work. Row-level failures — by
+far the common case — are already surfaced properly via
+`FailedImportRecord`. Closing #22 also narrowed the biggest cause of
+whole-file failures: a malformed mapping is now rejected synchronously at
+save time with a specific 400, so the most likely way to reach this state
+is now an operational problem (storage unreachable) rather than a user
+mistake.
+**To close:** Add a nullable `failureReason` column to `ImportJob`,
+populate it in the processor's catch block alongside the existing log, and
+return it from `getStatus()`. Small and contained, but it is a schema
+change plus a migration, so it was not folded into #22's close-out.
+
+### 45. ~~`npm run start` points at the wrong entrypoint — the production start script is broken~~ — RESOLVED
+`"start"` now runs `node dist/src/main.js`, matching where `nest build`
+actually emits. Verified by running it for real against the docker-compose
+stack: the app boots and serves, `GET /api/v1/health/liveness` returns
+`200 {"status":"ok"}`, `GET /api/v1/health/readiness` returns 200 with
+`database: up` and `redis: up`, and Swagger serves at `/api/docs` — none of
+which was reachable through this script before.
+
+Deliberately fixed the *script*, not the *layout*: `tsconfig.json`'s
+`include` still covers `prisma.config.ts` and `test/`, so the inferred
+`rootDir` is still the project root and output still lands one level deeper
+than a plain `src`-only build would put it. Setting an explicit
+`rootDir`/`outDir` remains the other legitimate fix, and it is still the
+better one to make *once*, alongside the first Dockerfile (Phase 10), where
+the whole build-output layout gets decided in one place. Pointing the
+script at today's real output makes it work now without pre-empting that
+decision — if the layout later changes, this one line changes with it.
 
 ---
 
-*Last updated: 2026-08-13, after linking Employee to User and completing per-employee payroll notifications.*
+*Last updated: 2026-08-18, after closing #22 (configurable CSV column
+mapping) and filing #43/#44 for the follow-ups deliberately left open,
+plus #45 for a broken start script found during manual verification.*

@@ -1,6 +1,13 @@
 // src/integration/adapters/csv/csv-provider.adapter.ts
 import { Injectable } from '@nestjs/common';
 import Papa from 'papaparse';
+import {
+  CanonicalCsvField,
+  ColumnMappingConfig,
+  REQUIRED_CSV_FIELDS,
+  isCanonicalCsvField,
+  validateColumnMappingShape,
+} from '../../domain/canonical-csv-fields';
 
 export interface CsvRow {
   department: string;
@@ -12,23 +19,10 @@ export interface CsvRow {
   description?: string;
 }
 
-export type CanonicalCsvField =
-  | 'department'
-  | 'category'
-  | 'vendor'
-  | 'amountMinorUnits'
-  | 'currency'
-  | 'expenseDate'
-  | 'description';
-export type ColumnMappingConfig = Partial<Record<CanonicalCsvField, string>>; // canonical field -> source column header
-
-const REQUIRED_FIELDS: CanonicalCsvField[] = [
-  'department',
-  'category',
-  'amountMinorUnits',
-  'currency',
-  'expenseDate',
-];
+// Canonical field names, the required subset, and mapping-shape validation
+// all live in `domain/canonical-csv-fields` — shared with the column-mapping
+// application layer so the two can't drift apart.
+export type { CanonicalCsvField, ColumnMappingConfig };
 
 export class CsvParseError extends Error {
   constructor(message: string) {
@@ -66,11 +60,13 @@ export class CsvProviderAdapter {
     const actualHeaders = result.meta.fields ?? [];
 
     if (mapping) {
-      const missingRequired = REQUIRED_FIELDS.filter((f) => !mapping[f]);
-      if (missingRequired.length > 0) {
-        throw new CsvParseError(
-          `Column mapping is missing required field(s): ${missingRequired.join(', ')}`,
-        );
+      // Shape validation runs here too, not just at save time: a mapping
+      // persisted before validation existed (or hand-edited in the DB) must
+      // still fail loudly against a real file rather than silently produce
+      // half-empty rows.
+      const problems = validateColumnMappingShape(mapping);
+      if (problems.length > 0) {
+        throw new CsvParseError(`Invalid column mapping: ${problems.join('; ')}`);
       }
 
       for (const [canonical, sourceHeader] of Object.entries(mapping)) {
@@ -83,15 +79,17 @@ export class CsvProviderAdapter {
 
       return result.data.map((row) => {
         const remapped: Record<string, string> = {};
-        (Object.keys(mapping) as CanonicalCsvField[]).forEach((canonical) => {
-          const sourceHeader = mapping[canonical];
-          if (sourceHeader) remapped[canonical] = row[sourceHeader];
-        });
+        Object.keys(mapping)
+          .filter(isCanonicalCsvField)
+          .forEach((canonical: CanonicalCsvField) => {
+            const sourceHeader = mapping[canonical];
+            if (sourceHeader) remapped[canonical] = row[sourceHeader];
+          });
         return remapped as unknown as CsvRow;
       });
     }
 
-    const missing = REQUIRED_FIELDS.filter((h) => !actualHeaders.includes(h));
+    const missing = REQUIRED_CSV_FIELDS.filter((h) => !actualHeaders.includes(h));
     if (missing.length > 0) {
       throw new CsvParseError(
         `Missing required column(s): ${missing.join(', ')}. Save a column mapping if your file uses different header names.`,
