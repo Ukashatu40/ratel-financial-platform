@@ -159,6 +159,79 @@ describe('CSV import (e2e)', () => {
       .expect(401);
   });
 
+  // TECH_DEBT #25 — any uploaded bytes were previously accepted as CSV and
+  // only failed later inside the worker, leaving an ImportJob in `failed`.
+  describe('upload file-type validation', () => {
+    const expectNoJobCreated = async () => {
+      const prisma = getE2eDbClient();
+      expect(await prisma.importJob.count({ where: { organizationId: orgId } })).toBe(0);
+    };
+
+    it('rejects a PDF with a 400, not a queued job that fails later', async () => {
+      const res = await request(server)
+        .post('/api/v1/imports')
+        .set('Authorization', `Bearer ${accountantToken}`)
+        .attach('file', Buffer.from('%PDF-1.7\n%\xe2\xe3\xcf\xd3\n'), 'invoice.pdf')
+        .expect(400);
+
+      expect(res.body.type).toContain('unsupported-import-file');
+      expect(res.body.detail).toContain('a PDF');
+      await expectNoJobCreated();
+    });
+
+    it('rejects an .xlsx workbook — the most likely honest mistake', async () => {
+      const xlsx = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x06, 0x00]);
+      const res = await request(server)
+        .post('/api/v1/imports')
+        .set('Authorization', `Bearer ${accountantToken}`)
+        .attach('file', xlsx, 'expenses.xlsx')
+        .expect(400);
+
+      expect(res.body.detail).toContain('.xlsx');
+      await expectNoJobCreated();
+    });
+
+    it('rejects binary content even when it is LABELLED as text/csv', async () => {
+      // The security-adjacent half of #25: the declared type is client-supplied,
+      // so an allowed value must not be enough to get bytes accepted.
+      const res = await request(server)
+        .post('/api/v1/imports')
+        .set('Authorization', `Bearer ${accountantToken}`)
+        .attach('file', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), {
+          filename: 'definitely-a.csv',
+          contentType: 'text/csv',
+        })
+        .expect(400);
+
+      expect(res.body.detail).toContain('PNG');
+      await expectNoJobCreated();
+    });
+
+    it('rejects an empty file', async () => {
+      const res = await request(server)
+        .post('/api/v1/imports')
+        .set('Authorization', `Bearer ${accountantToken}`)
+        .attach('file', Buffer.alloc(0), 'empty.csv')
+        .expect(400);
+
+      expect(res.body.detail).toContain('empty');
+      await expectNoJobCreated();
+    });
+
+    it('CONTROL: still accepts a real CSV with a UTF-8 BOM, as Excel writes it', async () => {
+      // Without this, "reject everything" would pass every test above.
+      const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+      await request(server)
+        .post('/api/v1/imports')
+        .set('Authorization', `Bearer ${accountantToken}`)
+        .attach('file', Buffer.concat([bom, Buffer.from(validCsv)]), 'excel-export.csv')
+        .expect(201);
+
+      const prisma = getE2eDbClient();
+      expect(await prisma.importJob.count({ where: { organizationId: orgId } })).toBe(1);
+    });
+  });
+
   // TECH_DEBT #22 — configurable column mapping. The unit suite covers the
   // remapping logic in isolation; these prove the whole HTTP path, since a
   // mapping is only worth anything if it survives save -> resolve-at-upload
@@ -236,8 +309,83 @@ describe('CSV import (e2e)', () => {
 
       expect(statusRes.body.status).toBe('failed');
 
+      // TECH_DEBT #44 — a whole-file failure produces no FailedImportRecord
+      // rows, so before this the caller got `status: 'failed'` and nothing
+      // else; the reason was reachable only in server logs. The reason must
+      // now be specific enough to self-serve a fix (which columns are
+      // missing), not just "it failed".
+      expect(statusRes.body.failureReason).toContain('Missing required column(s)');
+      expect(statusRes.body.failureReason).toContain('department');
+
+      // Still no per-row errors for this failure mode — the whole file died
+      // before any row was reached, which is exactly why #44 existed.
+      const errorsRes = await request(server)
+        .get(`/api/v1/imports/${uploadRes.body.importJobId}/errors`)
+        .set('Authorization', `Bearer ${accountantToken}`)
+        .expect(200);
+      expect(errorsRes.body).toEqual([]);
+
       const prisma = getE2eDbClient();
       expect(await prisma.expense.count({ where: { organizationId: orgId } })).toBe(0);
+    });
+
+    it('leaves failureReason null on a successful import', async () => {
+      // The control for the above: a populated failureReason must mean
+      // something actually failed, not just that the column exists.
+      const saveRes = await saveMapping(fullMapping).expect(201);
+
+      const uploadRes = await request(server)
+        .post(`/api/v1/imports?mappingId=${saveRes.body.id}`)
+        .set('Authorization', `Bearer ${accountantToken}`)
+        .attach('file', Buffer.from(nonCanonicalCsv), 'bank-export.csv')
+        .expect(201);
+
+      await new Promise((r) => setTimeout(r, 4000));
+
+      const statusRes = await request(server)
+        .get(`/api/v1/imports/${uploadRes.body.importJobId}`)
+        .set('Authorization', `Bearer ${accountantToken}`)
+        .expect(200);
+
+      expect(statusRes.body.status).toBe('completed');
+      expect(statusRes.body.failureReason).toBeNull();
+    });
+
+    it('clears a previous attempt\'s failureReason when the job is processed again', async () => {
+      // The same ImportJob row can legitimately be processed more than once
+      // (operator re-enqueue, queue redelivery — the path the Inbox pattern
+      // exists for). A stale reason surviving onto a `completed` job would be
+      // worse than having no reason at all, since it reads as authoritative.
+      const saveRes = await saveMapping(fullMapping).expect(201);
+      const uploadRes = await request(server)
+        .post(`/api/v1/imports?mappingId=${saveRes.body.id}`)
+        .set('Authorization', `Bearer ${accountantToken}`)
+        .attach('file', Buffer.from(nonCanonicalCsv), 'bank-export.csv')
+        .expect(201);
+      const importJobId = uploadRes.body.importJobId;
+
+      await new Promise((r) => setTimeout(r, 4000));
+
+      // Plant a reason as a prior failed attempt would have left it, then
+      // re-run the very same job.
+      const prisma = getE2eDbClient();
+      await prisma.importJob.update({
+        where: { id: importJobId },
+        data: { failureReason: 'stale reason from an earlier attempt' },
+      });
+
+      const queue = app.get<Queue>(`BullQueue_${IMPORT_JOB_QUEUE}`);
+      await queue.add(IMPORT_JOB_NAME, { importJobId });
+
+      await new Promise((r) => setTimeout(r, 4000));
+
+      const statusRes = await request(server)
+        .get(`/api/v1/imports/${importJobId}`)
+        .set('Authorization', `Bearer ${accountantToken}`)
+        .expect(200);
+
+      expect(statusRes.body.status).toBe('completed');
+      expect(statusRes.body.failureReason).toBeNull();
     });
 
     it('lists saved mappings by name, without echoing organizationId back', async () => {
@@ -312,6 +460,108 @@ describe('CSV import (e2e)', () => {
         .set('Authorization', `Bearer ${accountantToken}`)
         .attach('file', Buffer.from(nonCanonicalCsv), 'bank-export.csv')
         .expect(404);
+    });
+
+    // TECH_DEBT #43 — mappings could be created and listed but never removed.
+    describe('deleting a saved mapping', () => {
+      it('deletes it, and it stops appearing in the list', async () => {
+        const saveRes = await saveMapping(fullMapping, 'Obsolete Source').expect(201);
+
+        await request(server)
+          .delete(`/api/v1/imports/column-mappings/${saveRes.body.id}`)
+          .set('Authorization', `Bearer ${accountantToken}`)
+          .expect(200);
+
+        const listRes = await request(server)
+          .get('/api/v1/imports/column-mappings')
+          .set('Authorization', `Bearer ${accountantToken}`)
+          .expect(200);
+
+        expect(listRes.body).toEqual([]);
+      });
+
+      it('makes the deleted mappingId unusable for a subsequent upload', async () => {
+        // The behavioural control: gone from the list isn't the same as gone.
+        const saveRes = await saveMapping(fullMapping, 'Obsolete Source').expect(201);
+
+        await request(server)
+          .delete(`/api/v1/imports/column-mappings/${saveRes.body.id}`)
+          .set('Authorization', `Bearer ${accountantToken}`)
+          .expect(200);
+
+        await request(server)
+          .post(`/api/v1/imports?mappingId=${saveRes.body.id}`)
+          .set('Authorization', `Bearer ${accountantToken}`)
+          .attach('file', Buffer.from(nonCanonicalCsv), 'bank-export.csv')
+          .expect(404);
+      });
+
+      it('leaves an ALREADY-PROCESSED import job intact', async () => {
+        // The whole reason hard delete is defensible here: ImportJob snapshots
+        // the mapping content, so deleting the mapping cannot retroactively
+        // change or damage a job that was parsed with it.
+        const saveRes = await saveMapping(fullMapping).expect(201);
+
+        const uploadRes = await request(server)
+          .post(`/api/v1/imports?mappingId=${saveRes.body.id}`)
+          .set('Authorization', `Bearer ${accountantToken}`)
+          .attach('file', Buffer.from(nonCanonicalCsv), 'bank-export.csv')
+          .expect(201);
+
+        await new Promise((r) => setTimeout(r, 4000));
+
+        await request(server)
+          .delete(`/api/v1/imports/column-mappings/${saveRes.body.id}`)
+          .set('Authorization', `Bearer ${accountantToken}`)
+          .expect(200);
+
+        const statusRes = await request(server)
+          .get(`/api/v1/imports/${uploadRes.body.importJobId}`)
+          .set('Authorization', `Bearer ${accountantToken}`)
+          .expect(200);
+
+        expect(statusRes.body.status).toBe('completed');
+        expect(statusRes.body.successCount).toBe(1);
+
+        const prisma = getE2eDbClient();
+        const job = await prisma.importJob.findUniqueOrThrow({
+          where: { id: uploadRes.body.importJobId },
+        });
+        expect(job.resolvedMapping).toEqual(fullMapping); // snapshot survived the delete
+      });
+
+      it('returns 404 for an unknown mapping id', async () => {
+        await request(server)
+          .delete('/api/v1/imports/column-mappings/00000000-0000-4000-8000-000000000999')
+          .set('Authorization', `Bearer ${accountantToken}`)
+          .expect(404);
+      });
+
+      it('refuses to delete a mapping belonging to a DIFFERENT organization', async () => {
+        const prisma = getE2eDbClient();
+        const otherOrg = await prisma.organization.create({ data: { name: 'Someone Else Ltd' } });
+        const foreign = await prisma.columnMapping.create({
+          data: { organizationId: otherOrg.id, name: 'Theirs', mapping: fullMapping },
+        });
+
+        await request(server)
+          .delete(`/api/v1/imports/column-mappings/${foreign.id}`)
+          .set('Authorization', `Bearer ${accountantToken}`)
+          .expect(404);
+
+        // 404 must mean "not yours", not "deleted anyway" — assert it survived.
+        expect(
+          await prisma.columnMapping.findUnique({ where: { id: foreign.id } }),
+        ).not.toBeNull();
+      });
+
+      it('rejects an unauthenticated delete with 401', async () => {
+        const saveRes = await saveMapping(fullMapping).expect(201);
+
+        await request(server)
+          .delete(`/api/v1/imports/column-mappings/${saveRes.body.id}`)
+          .expect(401);
+      });
     });
   });
 });
