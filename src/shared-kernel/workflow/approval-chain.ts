@@ -1,7 +1,7 @@
 // src/shared-kernel/workflow/approval-chain.ts
 export interface ApprovalStep {
   readonly order: number;
-  readonly requiredRole: string;       // e.g. 'department_head', 'finance_director'
+  readonly requiredRole: string; // e.g. 'department_head', 'finance_director'
   readonly requiredScope: 'department' | 'organization';
 }
 

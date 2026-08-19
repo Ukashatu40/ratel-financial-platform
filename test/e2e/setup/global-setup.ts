@@ -2,6 +2,7 @@
 import { PostgreSqlContainer, StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { RedisContainer, StartedRedisContainer } from '@testcontainers/redis';
 import { MinioContainer, StartedMinioContainer } from '@testcontainers/minio';
+import { GenericContainer, Wait } from 'testcontainers';
 import { execSync } from 'child_process';
 import { writeFileSync } from 'fs';
 import { join } from 'path';
@@ -16,6 +17,23 @@ export default async function globalSetup(): Promise<void> {
     .start();
   const redis: StartedRedisContainer = await new RedisContainer('redis:7-alpine').start();
   const minio: StartedMinioContainer = await new MinioContainer('minio/minio:latest').start();
+
+  // eslint-disable-next-line no-console
+  console.log(
+    '[e2e setup] Starting ClamAV container — this can take several minutes on first run while it downloads virus signatures...',
+  );
+
+  const clamav = await new GenericContainer('clamav/clamav:stable')
+    .withExposedPorts(3310)
+    .withWaitStrategy(Wait.forLogMessage(/socket found, clamd started/i))
+    .withStartupTimeout(300000)
+    .start();
+
+  const clamavHost = clamav.getHost();
+  const clamavPort = clamav.getMappedPort(3310);
+
+  // eslint-disable-next-line no-console
+  console.log(`[e2e setup] ClamAV ready at ${clamavHost}:${clamavPort}`);
 
   const databaseUrl = postgres.getConnectionUri();
   const redisHost = redis.getHost();
@@ -48,12 +66,15 @@ export default async function globalSetup(): Promise<void> {
       postgresContainerId: postgres.getId(),
       redisContainerId: redis.getId(),
       minioContainerId: minio.getId(),
+      clamavContainerId: clamav.getId(),
       databaseUrl,
       redisHost,
       redisPort,
       minioEndpoint,
       minioAccessKey: minio.getUsername(),
       minioSecretKey: minio.getPassword(),
+      clamavHost,
+      clamavPort,
     }),
     'utf8',
   );

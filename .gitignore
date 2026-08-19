@@ -6,6 +6,7 @@
 .env
 docs/architecture.md
 example.data.txt
+CLAUDE.md
 
 # .gitignore
 node_modules/
@@ -15,3 +16,8 @@ coverage/
 *.log
 .DS_Store
 prisma/migrations/dev.db
+
+# ClamAV signature databases, downloaded by the e2e harness's container.
+# ~112MB of binary .cvd files that regenerate themselves on demand — must
+# never enter git history, where they'd be permanent.
+test/.clamav-cache/
