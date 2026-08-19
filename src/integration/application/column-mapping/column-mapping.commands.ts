@@ -6,3 +6,10 @@ export class SaveColumnMappingCommand {
     readonly mapping: Record<string, string>,
   ) {}
 }
+
+export class DeleteColumnMappingCommand {
+  constructor(
+    readonly organizationId: string,
+    readonly mappingId: string,
+  ) {}
+}

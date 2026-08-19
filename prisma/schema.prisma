@@ -503,6 +503,13 @@ model ImportJob {
 
   resolvedMapping Json? @map("resolved_mapping") // NEW — null means "use default canonical headers" (today's behavior, unchanged)
 
+  // Why a WHOLE-FILE failure happened (bad mapping, unparseable content,
+  // object storage unreachable). Row-level failures live in
+  // `FailedImportRecord`; a whole-file failure produces none of those, so
+  // without this column `status: 'failed'` reached the API with no reason
+  // attached and the cause was reachable only by an engineer reading logs.
+  failureReason String? @map("failure_reason")
+
   failedRecords FailedImportRecord[]
 
   @@index([organizationId, status])

@@ -9,6 +9,7 @@ import { ImportRecordMapper } from './acl/import-record-mapper';
 import {
   SaveColumnMappingHandler,
   ListColumnMappingsHandler,
+  DeleteColumnMappingHandler,
 } from './application/column-mapping/column-mapping.handlers';
 import { ImportController } from './presentation/controllers/import.controller';
 import { ImportJobProcessor } from '../jobs/processors/import-job.processor';
@@ -25,6 +26,7 @@ import { IMPORT_JOB_QUEUE } from '../jobs/queues/import-job.queue';
     ImportJobProcessor,
     SaveColumnMappingHandler,
     ListColumnMappingsHandler,
+    DeleteColumnMappingHandler,
   ],
 })
 export class IntegrationModule {}
