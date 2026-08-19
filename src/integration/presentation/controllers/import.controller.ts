@@ -1,6 +1,7 @@
 // src/integration/presentation/controllers/import.controller.ts
 import {
   Controller,
+  Delete,
   Get,
   Param,
   Post,
@@ -28,10 +29,18 @@ import { ApiBearerAuth, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagg
 import {
   SaveColumnMappingHandler,
   ListColumnMappingsHandler,
+  DeleteColumnMappingHandler,
 } from '../../application/column-mapping/column-mapping.handlers';
-import { SaveColumnMappingCommand } from '../../application/column-mapping/column-mapping.commands';
+import {
+  SaveColumnMappingCommand,
+  DeleteColumnMappingCommand,
+} from '../../application/column-mapping/column-mapping.commands';
 import { ListColumnMappingsQuery } from '../../application/column-mapping/column-mapping.queries';
 import { SaveColumnMappingDto } from '../dto/save-column-mapping.dto';
+import {
+  UnsupportedImportFileError,
+  validateCsvUpload,
+} from '../../domain/csv-file-validation';
 
 const MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024; // 5MB — generous for CSV, deliberately capped
 
@@ -46,6 +55,7 @@ export class ImportController {
     @Inject(OBJECT_STORAGE_PORT) private readonly storage: ObjectStoragePort,
     private readonly saveColumnMapping: SaveColumnMappingHandler,
     private readonly listColumnMappings: ListColumnMappingsHandler,
+    private readonly deleteColumnMapping: DeleteColumnMappingHandler,
   ) {}
 
   @ApiOperation({
@@ -72,7 +82,13 @@ export class ImportController {
     }
 
     const buffer = await file.toBuffer();
-    const rawContent = buffer.toString('utf8');
+
+    // Validate BEFORE uploading: a file that can never be parsed should not
+    // reach object storage at all, and the caller should hear about it
+    // synchronously rather than by polling an ImportJob into `failed`.
+    const problems = validateCsvUpload({ contentType: file.mimetype, buffer });
+    if (problems.length > 0) throw new UnsupportedImportFileError(problems);
+
     const importJobId = randomUUID();
     const storageKey = `${user.organizationId}/imports/${importJobId}.csv`;
 
@@ -111,6 +127,21 @@ export class ImportController {
     return this.listColumnMappings.execute(new ListColumnMappingsQuery(user.organizationId));
   }
 
+  @ApiOperation({
+    summary: 'Delete a saved CSV column mapping',
+    description:
+      'Hard delete. Already-processed import jobs are unaffected — each snapshots the ' +
+      'mapping content it was parsed with (ImportJob.resolvedMapping) and holds no ' +
+      'reference to this row.',
+  })
+  @RequirePermission('expense:create')
+  @Delete('column-mappings/:id')
+  async deleteMapping(@Param('id') id: string, @CurrentUser() user: UserPrincipal) {
+    await this.deleteColumnMapping.execute(
+      new DeleteColumnMappingCommand(user.organizationId, id),
+    );
+  }
+
   @ApiOperation({ summary: 'Check the status/progress of an import job' })
   @RequirePermission('expense:create')
   @Get(':jobId')
@@ -126,6 +157,9 @@ export class ImportController {
       totalRecords: job.totalRecords,
       successCount: job.successCount,
       failureCount: job.failureCount,
+      // Only ever populated for a WHOLE-FILE failure (unfetchable/unparseable
+      // file, bad mapping). Row-level failures stay in GET :jobId/errors.
+      failureReason: job.failureReason,
       createdAt: job.createdAt,
       completedAt: job.completedAt,
     };

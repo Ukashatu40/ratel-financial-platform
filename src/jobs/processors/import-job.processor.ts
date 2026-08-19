@@ -40,7 +40,16 @@ export class ImportJobProcessor extends WorkerHost {
 
     await this.prisma.importJob.update({
       where: { id: importJobId },
-      data: { status: 'processing' },
+      data: {
+        status: 'processing',
+        // Cleared per attempt, not only set on failure: this same ImportJob row
+        // can be processed more than once (an operator re-enqueueing it, a queue
+        // redelivery — the path the Inbox pattern exists for). Without clearing
+        // here, a job that failed and then succeeded on a later attempt would
+        // report `completed` while still carrying the previous attempt's
+        // failureReason.
+        failureReason: null,
+      },
     });
 
     let rows;
@@ -56,13 +65,17 @@ export class ImportJobProcessor extends WorkerHost {
         (importJob.resolvedMapping as Record<string, string> | null) ?? undefined,
       );
     } catch (err) {
+      // A whole-file failure produces no FailedImportRecord rows (those are
+      // per-row), so without persisting the reason here the caller sees
+      // `status: 'failed'` with nothing to act on. Logged AND stored: the log
+      // keeps the stack for an engineer, `failureReason` gives the API
+      // something to return.
+      const reason = (err as Error).message;
       await this.prisma.importJob.update({
         where: { id: importJobId },
-        data: { status: 'failed', completedAt: new Date() },
+        data: { status: 'failed', completedAt: new Date(), failureReason: reason },
       });
-      this.logger.error(
-        `Import job ${importJobId} failed to fetch/parse: ${(err as Error).message}`,
-      );
+      this.logger.error(`Import job ${importJobId} failed to fetch/parse: ${reason}`);
       return;
     }
 
