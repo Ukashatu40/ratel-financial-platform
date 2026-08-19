@@ -216,21 +216,48 @@ endpoints need no equivalent scoping since every payroll permission is
 organization-scoped only. See new item #21 for a design choice made while
 building this that's worth flagging on its own.
 
-### 21. Payroll's GET :id response is shaped for a two-tier view split that isn't actually enforced
-**Where:** `GetPayrollRunByIdHandler`
-**What:** The handler's response deliberately omits the decrypted
-line-item breakdown (only returns `employeeId`/`grossPay`/`netPay` per
-payslip), with a comment implying this is a lighter "summary" view distinct
-from full sensitive detail. In reality, BOTH this summary and any future
-full-detail endpoint currently sit behind the exact same permission
-(`payroll:view_sensitive`) — there's no actual two-tier authorization here,
-just a response shape that looks like there might be one day.
-**To close:** Either commit to the two-tier design for real (a separate,
-more restrictive permission for full line-item detail vs. this summary), or
-simplify the response/comment to stop implying a distinction that isn't
-enforced. Low priority — not a security gap (the single permission gate is
-still correctly enforced), just a piece of code whose shape overstates its
-own behavior.
+### 21. ~~Payroll's GET :id response is shaped for a two-tier view split that isn't actually enforced~~ — RESOLVED
+Took the second of the two options this item offered — simplify the response
+and comment to stop implying an authorization distinction that isn't
+enforced — rather than committing to a two-tier permission split, which
+would have been a product decision, not a debt fix. The payslip projection
+itself is unchanged (identity + gross/net, no line items): it is a narrow
+projection for its own sake, the same discipline as `ColumnMappingView`, and
+the comment now says that instead of hinting at a second permission tier.
+Where a genuine two-tier decision would belong — a future full-line-item
+endpoint — is now stated explicitly at the one place it would be made.
+
+**A live bug was found while closing this, which is the actual reason it
+mattered.** The payslip projection was written as an arrow function with a
+*block* body containing labelled statements and no `return`:
+
+```ts
+payslips: run.getPayslips.map((p) => {
+  const pProps = p.toProps();
+  employeeId: pProps.employeeId;   // a label, not an object property
+  grossPay: pProps.grossPay.toJSON();
+  netPay: pProps.netPay.toJSON();
+}),
+```
+
+So `GET /payroll-runs/:id` served `payslips: [undefined, undefined, …]` —
+one `undefined` per payslip — for every payroll run since the endpoint was
+built. Two things let it ship: the handler's return type was `any`, so
+`tsc` had nothing to check the callback against, and the handler had no unit
+or e2e coverage at all.
+
+Fixed all three layers of that, not just the syntax:
+- The callback returns a real object, and each payslip's `id` is now
+  included (it was absent from the intended shape too — a caller had no way
+  to address an individual payslip).
+- The handler's return type is now an explicit `PayrollRunDetailView` /
+  `PayrollRunPayslipView` instead of `any`, so the same class of mistake
+  becomes a compile error rather than a silently-empty response.
+- Added 6 unit tests, including one asserting the exact key set of a
+  projected payslip — so a future widening of this response has to be a
+  deliberate change to that expectation rather than an accident — and the
+  cross-organization 404 case, which payroll's sensitivity warrants.
+
 
 ## Data Integrity
 
@@ -367,14 +394,45 @@ too — converted both to `DomainError` subclasses (400) alongside this fix,
 since it's the identical root cause. Verified via e2e: unsupported file
 type now returns 400, not 500.
 
-### 25. No file-type/content validation on CSV upload
-**Where:** `ImportController.create()`
-**What:** Accepts any uploaded file as if it were CSV — no MIME-type check,
-no content-sniffing (Phase 9.7's "secure file uploads" guidance). A
-non-CSV file just fails at parse time with a generic error, which is safe
-but not a great experience, and doesn't address the security-adjacent
-concern of blindly trusting client-declared file type.
-**To close:** Add content-sniffing validation before attempting to parse.
+### 25. ~~No file-type/content validation on CSV upload~~ — RESOLVED
+`ImportController.create()` now validates every upload before it reaches
+object storage, via a new `integration/domain/csv-file-validation.ts`. Two
+checks, ordered by how much each can be trusted:
+1. **Declared content type** — a cheap first filter only. The allowlist
+   deliberately includes the ambiguous-but-legitimate values real clients
+   send for a genuine `.csv` (`application/vnd.ms-excel` on Windows,
+   `text/plain` from many editors, `application/octet-stream` from `curl`
+   with no explicit header — which is how this project's own manual
+   verification uploads files). Rejecting those would block real users while
+   stopping no attacker, since the header is self-declared.
+2. **Actual content** — the real gate, and the part that addresses the
+   security-adjacent half of this item. Known binary signatures (PDF,
+   ZIP/`.xlsx`, legacy `.xls`/`.doc`, PNG, JPEG, GIF, gzip, bzip2, RAR, ELF)
+   are named specifically in the error, and anything else binary is caught by
+   NUL bytes over a bounded 8KB window. This runs regardless of what the
+   client claimed, so an allowed content type cannot wave binary bytes
+   through.
+
+Validation runs **before** the storage upload, so a file that can never be
+parsed never occupies a bucket object, and the caller gets a specific 400
+synchronously (`UnsupportedImportFileError`, a `DomainError` per critical
+convention #5) instead of having to poll an `ImportJob` into `failed`.
+
+Deliberately does NOT validate CSV *structure* — headers, column count,
+delimiters. `CsvProviderAdapter` already owns that and produces better,
+mapping-aware messages; duplicating it here would recreate exactly the
+silent-drift risk #22/#37 closed.
+
+Two things verified rather than assumed while building this:
+- A leading UTF-8 BOM is tolerated end to end. Excel writes one, and it is
+  skipped for signature matching (so a BOM can't be used to hide a `%PDF`
+  header) — confirmed by test. Separately confirmed empirically that
+  papaparse itself handles a leading BOM without corrupting the first header
+  name, so no BOM-stripping was needed in the adapter.
+- 27 unit tests plus 5 e2e tests, including a CONTROL case (a real CSV with a
+  BOM must still return 201) so "reject everything" cannot pass the suite,
+  and a case where PNG bytes are labelled `text/csv` to prove the declared
+  type isn't load-bearing.
 
 ---
 
@@ -401,39 +459,73 @@ uploaded EICAR test file is detected as `infected` and its download is
 refused. The chain of wiring bugs this integration surfaced is recorded
 separately as #36.
 
-### 27. `S3ObjectStorageAdapter` still lazily validates config — the test-coverage half is now closed
-**Where:** `S3ObjectStorageAdapter.getClient()`
-**What:** Originally two gaps in one entry. The second is now closed: a
-MinIO Testcontainers module is wired into the e2e harness (same pattern as
-Postgres/Redis), and `attachments.e2e.spec.ts` exercises upload, scan and
-download against a real MinIO container, so this piece is no longer
-untested.
-**Still open:** object storage config (`OBJECT_STORAGE_*`) is validated
-only on first actual use, inside `getClient()`, not at app boot. A
-genuinely missing or misconfigured production config still wouldn't surface
-until the first real upload attempt rather than at deploy time.
-**Why acceptable so far:** The lazy check is deliberate — it lets the app,
-and every e2e suite that doesn't touch attachments, boot without a MinIO
-container at all. A hard-fail at boot would couple every deployment to
-object storage being configured, which isn't true for every deployment.
-**To close:** A startup log warning (not `validateEnv`'s hard-fail) when
-`OBJECT_STORAGE_*` is unset — enough to make a misconfiguration visible at
-deploy time without making storage a boot dependency.
+### 27. ~~`S3ObjectStorageAdapter` still lazily validates config~~ — RESOLVED
+Originally two gaps in one entry; both are now closed.
+
+The test-coverage half closed earlier: a MinIO Testcontainers module is wired
+into the e2e harness (same pattern as Postgres/Redis), and
+`attachments.e2e.spec.ts` exercises upload, scan and download against a real
+MinIO container.
+
+The config-visibility half is now closed too, using exactly the fix this item
+prescribed rather than a bigger one: `S3ObjectStorageAdapter.onModuleInit()`
+logs at boot — a `warn` naming **every** missing `OBJECT_STORAGE_*` variable
+(not just the first), plus what specifically breaks as a result
+("attachments and CSV import will fail on first use; every other endpoint is
+unaffected"), or an informational `log` of the configured bucket/endpoint
+when all four are set.
+
+Deliberately a warning and not a `validateEnv` hard-fail: the lazy check in
+`getClient()` is kept exactly as it was, so the app — and any e2e suite that
+doesn't touch attachments — still boots with no object storage at all. A
+boot-time hard-fail would couple every deployment to object storage being
+configured, which isn't true for every deployment. The two behaviours are
+complementary: visible at deploy time, still not a boot dependency.
+
+Covered by 5 unit tests, including the two that pin the trade-off itself:
+missing config must NOT throw at `onModuleInit`, and must still throw on
+first actual use. Empty string is treated as unset rather than configured.
 
 ## Testing Infrastructure
 
-### 28. Unit test suite logs a Jest "worker failed to exit gracefully" warning
-**Where:** `npm test` (unit suite only — integration/e2e legitimately hold
-real DB/Redis handles, so a similar warning there wouldn't be surprising;
-this is specifically the unit run, which should have zero real I/O).
-**What:** `"A worker process has failed to exit gracefully and has been
-force exited... Active timers can also cause this."` appears after all 146
-unit tests pass. Not investigated — every test passes and nothing is
-functionally broken, but a genuine leak in a suite with no I/O is worth
-understanding eventually (likely candidates: an un-`.unref()`'d timer
-somewhere, or a native binding like `argon2` holding a handle open).
-**To close:** Run `npm test -- --detectOpenHandles` and trace the actual
-source before it becomes a CI timeout problem as the suite grows further.
+### 28. ~~Unit test suite logs a Jest "worker failed to exit gracefully" warning~~ — RESOLVED
+**Root cause: CPU contention in Jest's worker pool, not a leak.** Both causes
+this item hypothesised were ruled out, and the actual mechanism was measured
+rather than guessed:
+
+- `--detectOpenHandles` reports **zero** open handles. (Note for anyone
+  re-running it: that flag implies `--runInBand`, so it cannot reproduce a
+  *worker* warning at all — it only proves nothing lingers in-process.)
+- **No single spec reproduces it.** All 26 unit spec files were run
+  individually; none warned.
+- **It tracks worker count, not code.** `--maxWorkers` 2, 4 and 8: clean.
+  15 (the default `cores - 1` on this 16-core machine): warns, deterministically
+  across repeated runs.
+- **Leave-one-out at 15 workers is the decisive evidence.** Omitting any of 22
+  of the 26 files still warns; omitting one of 4 mutually unrelated files makes
+  it disappear. That is the signature of *how work happens to be distributed
+  across workers*, not of a specific file holding something open.
+- Both original hypotheses are dead: `src/` contains **no** `setInterval`/
+  `setTimeout` anywhere, and no unit spec loads `argon2` (only `AuthService`
+  imports it, and no unit spec touches `AuthService`).
+
+So: 15 concurrent ts-jest TypeScript compilations on 16 cores contend badly
+enough that some workers miss Jest's teardown grace period and get
+force-exited.
+
+**Fix:** `maxWorkers: '50%'` in `test/jest.unit.config.js` — the same
+treatment the integration and e2e configs already give `maxWorkers`, for their
+own different reason. A percentage rather than a fixed number so a smaller CI
+box doesn't end up serialized.
+
+**This is not `forceExit` and not masking anything.** The measurement is the
+justification: the full unit suite runs in **~11s capped vs ~25s uncapped**, so
+the cap is a 2.3x speedup that also happens to remove the warning — worth
+doing even if the warning had never existed. A genuine handle leak would still
+surface (as a hang, or via `--detectOpenHandles`) at any worker count.
+
+Verified: `npm test` now runs 220/220 green in ~11s with zero warnings, three
+runs in a row.
 
 ---
 
@@ -661,49 +753,83 @@ and must never be hard-deleted).
 
 ## Integration Layer — Column Mapping Follow-ups
 
-### 43. Saved column mappings can be created and listed, but never deleted
-**Where:** `ImportController`, `column-mapping.handlers.ts`
-**What:** `POST /imports/column-mappings` upserts by `(organizationId,
-name)` and `GET /imports/column-mappings` lists them, but there is no
-delete. A mapping saved by mistake, or for a source system no longer in
-use, stays in the picker forever. Renaming is also impossible — saving
-under a new name creates a second mapping rather than moving the old one.
-**Why acceptable so far:** Upsert-by-name means a wrong mapping can always
-be *corrected* in place (the common case) even though it can't be removed,
-and the list is scoped per organization, so clutter is bounded by how many
-distinct source formats one org actually imports from.
-**To close:** A `DELETE /imports/column-mappings/:id` gated on the same
-`expense:create` permission. Worth deciding at that point whether delete
-should be a hard delete or follow this codebase's soft-delete convention
-(critical convention #3) — `ImportJob.resolvedMapping` snapshots the
-mapping content at upload time and holds no FK to `ColumnMapping`, so no
-historical import job would be damaged by a hard delete, which is the
-usual reason that convention exists. This is the rare case where hard
-delete is probably defensible; it should be an explicit decision rather
-than an assumption either way.
+### 43. ~~Saved column mappings can be created and listed, but never deleted~~ — RESOLVED
+`DELETE /imports/column-mappings/:id` added, gated on the same
+`expense:create` permission as the rest of the import surface.
 
-### 44. A whole-file import failure records no reason the API can return
-**Where:** `ImportJobProcessor.process()`, `ImportController.getStatus()`
-**What:** When a file fails to fetch or parse at all (bad mapping,
-non-CSV content, object storage unreachable), the processor sets
-`ImportJob.status = 'failed'` and logs the reason server-side — but
-persists it nowhere the API exposes. `GET /imports/:jobId` has no error
-field, and `GET /imports/:jobId/errors` returns `[]`, because a whole-file
-failure produces no `FailedImportRecord` rows (those are per-row). The
-user sees `status: "failed"` with no explanation and no way to self-serve
-a fix; the actual message is only reachable by an engineer reading logs.
-**Why acceptable so far:** Pre-existing since the import pipeline was
-built, not introduced by the column-mapping work. Row-level failures — by
-far the common case — are already surfaced properly via
-`FailedImportRecord`. Closing #22 also narrowed the biggest cause of
-whole-file failures: a malformed mapping is now rejected synchronously at
-save time with a specific 400, so the most likely way to reach this state
-is now an operational problem (storage unreachable) rather than a user
-mistake.
-**To close:** Add a nullable `failureReason` column to `ImportJob`,
-populate it in the processor's catch block alongside the existing log, and
-return it from `getStatus()`. Small and contained, but it is a schema
-change plus a migration, so it was not folded into #22's close-out.
+**Hard delete, decided explicitly** — this item asked for that decision to be
+made rather than assumed, so: critical convention #3 (soft delete) exists so
+an `Expense`/`Payslip` can never reference a row that vanished. A
+`ColumnMapping` is referenced by nothing. `ImportJob.resolvedMapping`
+*snapshots* the mapping's content at upload time and holds no FK back to this
+table, so deleting a mapping cannot re-explain or damage a historical import
+job's parse. There is nothing here for a soft delete to protect, and an
+`isActive` column would add a filter that every read path (list,
+resolve-at-upload) must remember — one miss and a "deleted" mapping is
+silently usable again. This is a documented exception to convention #3, not
+drift; the reasoning is repeated in the handler so it can't be mistaken for
+an oversight at the code.
+
+The delete is scoped by `organizationId` **in the same statement** as the id
+(`deleteMany({ where: { id, organizationId } })`, then `count === 0` → 404),
+rather than fetch-then-delete: no window in which the ownership check and the
+delete can disagree, and "not yours" is indistinguishable from "doesn't
+exist" so the endpoint can't be used to probe which IDs exist elsewhere.
+
+Renaming, also named in this item, is now possible as save-under-new-name +
+delete-old. A dedicated rename endpoint was not added — with upsert-by-name
+plus delete, it would be pure sugar.
+
+Covered by 3 unit tests and 6 e2e tests, including the one that proves the
+hard-delete reasoning rather than just asserting it: an import job processed
+with a mapping still reports `completed` with its `resolvedMapping` snapshot
+intact after that mapping is deleted. Also covered: a deleted `mappingId`
+becomes unusable for a later upload (gone from the list is not the same as
+gone), and another organization's mapping returns 404 **and still exists
+afterwards**.
+
+### 44. ~~A whole-file import failure records no reason the API can return~~ — RESOLVED
+Added `ImportJob.failureReason String?` (migration
+`20260819105302_add_import_job_failure_reason`), populated in
+`ImportJobProcessor`'s fetch/parse catch block alongside the existing
+server-side log, and returned from `GET /imports/:jobId`.
+
+Log AND column, not one or the other: the log keeps the full context for an
+engineer, the column gives the API something specific to return. A caller who
+uploads a file with the wrong headers now gets back
+`"Missing required column(s): department, category, …"` and can fix it
+themselves, instead of `status: "failed"` with the reason reachable only by
+someone with log access.
+
+Nullable rather than defaulted, deliberately: a populated `failureReason` must
+mean a whole-file failure actually happened. Row-level failures are unchanged
+— they stay in `FailedImportRecord` via `GET /imports/:jobId/errors`, and
+`failureReason` stays null for them.
+
+The column is also **cleared on each attempt**, at the `processing` transition
+rather than only written on failure. The same `ImportJob` row can legitimately
+be processed more than once — an operator re-enqueueing it, or a queue
+redelivery, which is the path the Inbox pattern exists for and which the e2e
+suite already exercises. Without clearing, a job that failed and then
+succeeded on a later attempt would report `completed` while still carrying the
+previous attempt's reason, which reads as authoritative and is worse than
+having no reason at all.
+
+Verified by extending the existing e2e CONTROL case (the non-canonical file
+uploaded with no `mappingId`, which was already asserting only
+`status: 'failed'`): it now also asserts the reason names the missing columns,
+and that `GET :jobId/errors` is still `[]` — the per-row/whole-file split
+that made this gap exist in the first place. Plus two new controls: that
+`failureReason` is null on a successful import, so a populated value means
+something failed rather than just that the column exists, and that a planted
+reason from a prior attempt is gone after the same job is re-enqueued.
+
+Also confirmed against the live docker-compose stack: a file with
+non-canonical headers and no mapping now returns
+`"Missing required column(s): department, category, amountMinorUnits,
+currency, expenseDate. Save a column mapping if your file uses different
+header names."` from `GET /imports/:jobId`, with `/errors` still `[]` — the
+exact gap this item described.
 
 ### 45. ~~`npm run start` points at the wrong entrypoint — the production start script is broken~~ — RESOLVED
 `"start"` now runs `node dist/src/main.js`, matching where `nest build`
@@ -725,6 +851,42 @@ decision — if the layout later changes, this one line changes with it.
 
 ---
 
-*Last updated: 2026-08-18, after closing #22 (configurable CSV column
-mapping) and filing #43/#44 for the follow-ups deliberately left open,
-plus #45 for a broken start script found during manual verification.*
+## Tooling
+
+### 46. `npm run lint` cannot run at all — no ESLint config exists
+**Where:** `package.json`'s `lint` script; the missing `eslint.config.js`.
+**What:** `npm run lint` fails immediately with `ESLint couldn't find an
+eslint.config.(js|mjs|cjs) file`. There is no ESLint configuration anywhere in
+the repo — no flat config, no legacy `.eslintrc.*` — despite `eslint@10`,
+`@eslint/js`, `typescript-eslint` and `eslint-config-prettier` all being
+installed and a `lint` script existing to invoke them. So the project has
+never been linted, and the script has presumably always been broken.
+**Found:** while trying to lint the files changed for #21/#25/#27/#43/#44 —
+the same way #45's broken `start` script was found, by actually running the
+script rather than assuming it worked.
+**Why it wasn't fixed alongside those items:** authoring a config from scratch
+means choosing a rule set and then absorbing however many pre-existing
+violations it surfaces across the whole codebase in one commit. That is a
+deliberate, separately-reviewable piece of work, not a side effect of closing
+unrelated debt items — folding it in would have buried five focused changes
+under a repo-wide reformat.
+**To close:** Add a flat `eslint.config.js` (`@eslint/js` recommended +
+`typescript-eslint` + `eslint-config-prettier` last, matching what's already
+installed), run it, and fix or explicitly disable what it finds — as its own
+piece of work. Two rules worth enabling deliberately while doing so, because
+they would each have caught a real bug in this codebase:
+`@typescript-eslint/no-unused-expressions` (which is exactly what #21's
+labelled-statement bug was) and `no-unused-vars` (which would have caught the
+dead `const rawContent = buffer.toString('utf8')` left in
+`ImportController.create()` after #23 moved content to object storage,
+removed while closing #25).
+
+---
+
+*Last updated: 2026-08-19, after closing #21 (payroll GET :id response shape,
+including a live bug it was hiding), #25 (CSV upload file-type/content
+validation), #27's remaining config-visibility half, #28 (Jest worker
+warning — diagnosed as worker-pool CPU contention, fixed with a `maxWorkers`
+cap that also made the unit suite 2.3x faster), #43 (`DELETE` for saved column
+mappings, hard delete decided explicitly) and #44 (`ImportJob.failureReason`).
+Filed #46 for a completely broken `npm run lint` found while verifying those.*
