@@ -75,6 +75,26 @@ describe('CSV import (e2e)', () => {
     'Engineering,NonexistentCategory,AWS,100000,NGN,2026-08-16,Bad row',
   ].join('\n');
 
+  /**
+   * Waits until the background worker has actually finished with a job, instead
+   * of guessing how long that takes. The fixed `setTimeout(4000)` used elsewhere
+   * in this file is a latent flake — it fires whenever the suite gets busier —
+   * so new assertions that depend on the worker use this instead.
+   */
+  async function waitForJobToSettle(
+    prisma: ReturnType<typeof getE2eDbClient>,
+    importJobId: string,
+    timeoutMs = 20000,
+  ): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const job = await prisma.importJob.findUnique({ where: { id: importJobId } });
+      if (job && (job.status === 'completed' || job.status === 'failed')) return true;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    return false;
+  }
+
   it('uploads a CSV, processes it async, and reports correct success/failure counts', async () => {
     const uploadRes = await request(server)
       .post('/api/v1/imports')
@@ -508,7 +528,12 @@ describe('CSV import (e2e)', () => {
           .attach('file', Buffer.from(nonCanonicalCsv), 'bank-export.csv')
           .expect(201);
 
-        await new Promise((r) => setTimeout(r, 4000));
+        // Polled rather than a fixed sleep: a hard-coded wait is a latent flake
+        // that fires whenever the suite gets busier, which is exactly what
+        // happened to this test once another spec file was added.
+        const prisma = getE2eDbClient();
+        const settled = await waitForJobToSettle(prisma, uploadRes.body.importJobId);
+        expect(settled).toBe(true);
 
         await request(server)
           .delete(`/api/v1/imports/column-mappings/${saveRes.body.id}`)
@@ -523,7 +548,6 @@ describe('CSV import (e2e)', () => {
         expect(statusRes.body.status).toBe('completed');
         expect(statusRes.body.successCount).toBe(1);
 
-        const prisma = getE2eDbClient();
         const job = await prisma.importJob.findUniqueOrThrow({
           where: { id: uploadRes.body.importJobId },
         });
