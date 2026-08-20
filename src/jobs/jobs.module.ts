@@ -50,6 +50,16 @@ import { BullMqEventDeliveryRetryScheduler } from './adapters/bullmq-event-deliv
     EventRedeliveryProcessor,
     { provide: EVENT_DELIVERY_RETRY_SCHEDULER, useClass: BullMqEventDeliveryRetryScheduler },
   ],
-  exports: [OutboxDispatchService, FailedEventDeliveryService, EventRedeliveryService],
+  // EVENT_DELIVERY_RETRY_SCHEDULER is exported so a caller OUTSIDE this module
+  // can redrive a failed delivery through the same port the dispatcher already
+  // uses, rather than a second mechanism. TECH_DEBT #47's operator retry
+  // endpoint is the intended consumer; it was provided but not exported, so
+  // nothing outside JobsModule could inject it at all.
+  exports: [
+    OutboxDispatchService,
+    FailedEventDeliveryService,
+    EventRedeliveryService,
+    EVENT_DELIVERY_RETRY_SCHEDULER,
+  ],
 })
 export class JobsModule {}

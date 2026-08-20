@@ -232,6 +232,89 @@ would previously have been lost present in the table and the chain intact (41
 entries, 41 distinct hashes). Also confirmed the permanent path: left the table
 broken and watched all 5 attempts exhaust into `permanently_failed`.
 
+**CORRECTION — automatic retry only ever worked for a pair's FIRST failure.**
+Found while scoping #47, in shipped code, by reading the dedupe key rather than
+by any test. `BullMqEventDeliveryRetryScheduler` enqueues with
+`jobId: redeliver-${failedDeliveryId}`, and that id is **stable across failure
+episodes**: `failed_event_deliveries` is upserted on its
+`(outboxEventId, subscriberName)` unique, so the same pair failing again reuses
+the same row, hence the same jobId. `EVENT_REDELIVERY_JOB_OPTIONS` set only
+`attempts` and `backoff` — no `removeOnComplete`/`removeOnFail` — so a finished
+job stayed in Redis under that id forever, and BullMQ honours a custom jobId in
+`completed` and `failed` as well as in flight. Every subsequent `queue.add()`
+for that pair therefore returned the existing job and enqueued **nothing**,
+without raising anything.
+
+**It was a defect, not a design choice, and the code says so.** The dedupe
+comment reasoned about the concurrent case only ("keeps one job rather than
+running the subscriber twice concurrently"), which is correct and still holds.
+But `recordFailures`'s update branch deliberately resets a `permanently_failed`
+row back to `pending_retry`, commented "a fresh failure for a pair that had been
+given up on is a live problem again" — and that intent was **unreachable**: the
+row revived, and then sat in `pending_retry` forever with no job to move it.
+
+**Why #9's own verification missed it.** All three e2e tests and the manual
+docker-compose run exercised exactly ONE failure episode per pair — the recovery
+test fails once then recovers, the permanent-failure test never recovers. Nothing
+asked the same pair to fail a *second* time, so the retained-job path was never
+entered. The blast radius is the same shape as the colon bug above: the common
+case #9 was built for (a single transient blip) worked, and everything past it
+silently did not.
+
+**Fixed** by setting `removeOnComplete: true` / `removeOnFail: true`, which
+releases the id when a job finishes and narrows dedupe to exactly what was
+intended — one *live* retry per failure row, while a new episode can always be
+scheduled. Nothing is lost by discarding the Redis job: per this item's own
+design the durable record is the Postgres row (`status`, `attempts`,
+`lastError`), which is also what #47 will read. It additionally bounds Redis
+growth, which retaining every completed and permanently-failed job did not.
+
+**Also fixed: `EVENT_DELIVERY_RETRY_SCHEDULER` was provided by `JobsModule` but
+absent from its `exports`**, so nothing outside that module could inject the port
+— #47's retry endpoint could not have been wired to it at all. Now exported.
+
+Covered at two layers, deliberately split: 1 e2e test is the **proof** (a fake
+`Queue` cannot exhibit BullMQ's id-retention semantics, which is the whole
+mechanism), driving a real second delivery by resetting the outbox row to
+`pending` for the live poller and asserting the pair recovers *twice*. 5 unit
+tests are the **fast guard**, because the two halves of the fix live in different
+files — the id is chosen in the scheduler, the options that release it in
+`event-redelivery.queue.ts` — so editing either alone silently re-breaks it.
+
+**Verified in the order that makes the fix mean something.** With only the two
+options flipped back to BullMQ's default (`false`) and nothing else changed, the
+new e2e test fails at exactly the predicted assertion — the log shows
+`failure on delivery 3` reviving the row, then no fourth delivery ever arrives and
+the wait for a second `recovered` times out. With them restored, 4/4 pass in that
+spec, re-run to confirm. 276/276 unit tests green (271 before, +5).
+
+**Two things learned by running it that are worth keeping**, since both are easy
+to get wrong again:
+- **BullMQ's `backoff` delays only retries WITHIN a job, never a new job's first
+  attempt.** So a freshly-scheduled redelivery runs immediately, and the row
+  passes through `pending_retry` in milliseconds rather than the ~5s the backoff
+  config implies. A first draft of this test asserted that intermediate state and
+  was therefore green *only while the bug was present* — exactly backwards. It now
+  gates on the monotonic call count instead.
+- **Outbox dispatch is at-least-once, so exact subscriber-invocation counts are
+  not safely assertable.** `dispatchPendingBatch`'s
+  `updateMany({where: {status: 'pending'}})` guard protects the status WRITE
+  against a concurrent poll cycle, not the dispatch itself — as that method's own
+  comment says. An exact `toBe(4)` here failed intermittently at 5 deliveries;
+  it is now `toBeGreaterThanOrEqual`, which keeps the test decisive (pre-fix it
+  stalls at 3) without pinning a number the pipeline does not promise. Note that
+  #9's pre-existing `expect(auditEntries).toHaveLength(1)` assertion shares this
+  exposure and is latently flaky for the same reason — not touched here, but it
+  should be relaxed the same way if it ever goes red.
+
+One inconsistency noted and deliberately NOT changed: across episodes `attempts`
+accumulates on the failure path (`increment: 1`) but is then overwritten to the
+current episode's total by `markRecovered`/`markPermanentlyFailed`, so a pair
+that recovered twice reads `2` rather than `4`. Defensible under this table's
+stated purpose — it tracks "is this still broken?", not history — but the two
+writers disagree about what the column means. Left alone rather than changed
+under an unrelated fix; worth settling if #47 surfaces the number to operators.
+
 **Deliberately left open — see #47** for the operator-facing surface
 (`GET /event-deliveries`, `POST /event-deliveries/:id/retry`), which needs a new
 permission and therefore a seed row plus a re-seed.
@@ -1128,9 +1211,51 @@ shape from #33/#35 — the retry endpoint can call the same
 `EventDeliveryRetryScheduler` port the dispatcher already uses, so no new
 mechanism is required, only the endpoint, the permission and its seed row.
 
+**Two prerequisites were found while scoping this, and are now cleared** (both
+recorded under #9's CORRECTION):
+1. The port was provided by `JobsModule` but not exported, so the endpoint could
+   not have injected it. Now exported.
+2. The retry would have been a **guaranteed silent no-op** — the BullMQ jobId is
+   derived from the failure row id and finished jobs were retained in Redis under
+   it, so `scheduleRetry` on an already-exhausted row enqueued nothing. Fixed.
+
+**One open question, which is the real decision in this item:**
+`failed_event_deliveries` has **no `organizationId` and no FK** (the missing FK is
+deliberate — see #9). So a `GET /event-deliveries` cannot scope by organization
+the way every other list endpoint does; the owning org is reachable only through
+`outbox_events.payload->>'organizationId'`. Three options, none obviously right:
+(a) join through `outbox_events` and filter on the payload — no schema change, but
+a JSON-path filter on a table with no index for it; (b) denormalize
+`organizationId` onto the row at write time — cheapest to query, mirrors how #7b
+scoped the audit chain per organization, costs a migration and a backfill
+decision; (c) treat this as a platform-operator surface that is deliberately
+org-agnostic, gated on an organization-scoped-only permission. (c) is the least
+work and arguably the most honest — the event pipeline is infrastructure, not
+per-org business data — but it is the one choice here that should be made
+explicitly rather than defaulted into, since it decides whether this endpoint can
+ever be exposed to a customer-facing admin.
+
 ---
 
-*Last updated: 2026-08-20, after fixing #10 — both expense approval threshold
+*Last updated: 2026-08-20. Most recently: **corrected #9** — its automatic
+redelivery only ever worked for a pair's FIRST failure. The BullMQ `jobId` is
+derived from the failure row's id, which is stable across failure episodes (the
+table is upserted on its unique pair), and finished jobs were retained in Redis
+under it, so every enqueue after the first was a silent no-op. The row dutifully
+returned to `pending_retry` — which `recordFailures` does on purpose — and then
+sat there with no job to move it. Found by reading the dedupe key while scoping
+#47, not by any test: all of #9's e2e coverage and its manual verification
+exercised exactly one failure episode per pair. Fixed with
+`removeOnComplete`/`removeOnFail`, proven by an e2e test observed failing at the
+predicted assertion with only those two options reverted. Two prerequisites for
+**#47** are now cleared (the retry-scheduler port was provided but never
+exported, and the retry would have been a guaranteed no-op), and #47 now records
+its one genuine open decision: how to scope a table that has no
+`organizationId`. Also documented two run-only findings — BullMQ's backoff never
+delays a new job's first attempt, and outbox dispatch is at-least-once, so exact
+subscriber-invocation counts are not safely assertable.*
+
+*Earlier the same day: after fixing #10 — both expense approval threshold
 constants were exactly 10x smaller than their own comments stated (`50_000_00n`
 is ₦50,000, not ₦500,000), so every expense from ₦50,000 to ₦500,000 was
 wrongly escalated to a second finance-director approval. Found by reading the

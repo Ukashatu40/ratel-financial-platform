@@ -156,4 +156,85 @@ describe('Event delivery retry (e2e)', () => {
     expect(dispatched).toBe(true);
     expect(await prisma.failedEventDelivery.count({ where: { outboxEventId } })).toBe(0);
   });
+
+  it('schedules a retry for a SECOND failure of the same (event, subscriber) pair', async () => {
+    // The regression pin for the jobId dedupe defect found while scoping #47.
+    //
+    // `failed_event_deliveries` is upserted on its (outboxEventId,
+    // subscriberName) unique, so a pair that fails, recovers, then fails again
+    // reuses the SAME row — and therefore the same `redeliver-<id>` jobId. BullMQ
+    // honours a custom jobId in `completed`/`failed` as well as in flight, so
+    // while finished jobs were retained in Redis the second episode's
+    // `queue.add()` returned the already-completed job and enqueued nothing. The
+    // row dutifully went back to `pending_retry` (recordFailures resets it on
+    // purpose) and then sat there forever, with no job to move it.
+    //
+    // Fails before the fix: `calls` stops at 3 and the row never leaves
+    // `pending_retry`. Only reachable end to end — a fake Queue cannot exhibit
+    // BullMQ's id-retention semantics, which is the same reason #9's colon bug
+    // was invisible until this suite ran.
+    let calls = 0;
+    dispatcher.register(
+      EVENT_TYPE,
+      async () => {
+        calls++;
+        // Fail the first delivery of each episode, succeed on its redelivery.
+        if (calls === 1 || calls === 3) throw new Error(`failure on delivery ${calls}`);
+      },
+      'RepeatFailureProbeSubscriber',
+    );
+
+    const prisma = getE2eDbClient();
+    const outboxEventId = await enqueueOutboxEvent();
+
+    const findRow = () =>
+      prisma.failedEventDelivery.findFirst({
+        where: { outboxEventId, subscriberName: 'RepeatFailureProbeSubscriber' },
+      });
+
+    // --- Episode 1: the path #9 already covered, here only to create the row
+    // (and, crucially, to leave a FINISHED job behind under its jobId).
+    expect(await waitFor(async () => (await findRow())?.status === 'recovered')).toBe(true);
+    const firstEpisode = await findRow();
+    // At LEAST 2, not exactly 2. Outbox dispatch is at-least-once: the poller's
+    // `updateMany({where: {status: 'pending'}})` guard protects the status WRITE
+    // from a concurrent cycle, not the dispatch itself, so an event can
+    // occasionally reach subscribers twice — OutboxDispatchService says as much in
+    // its own comment. Asserting an exact count here made this test fail
+    // intermittently with 5 deliveries; the count is not the property under test.
+    expect(calls).toBeGreaterThanOrEqual(2);
+
+    // --- Episode 2: re-dispatch the same outbox event. Resetting the row to
+    // 'pending' is exactly what the live poller consumes, so this drives a real
+    // second delivery through production code rather than simulating one.
+    await prisma.outboxEvent.update({
+      where: { id: outboxEventId },
+      data: { status: 'pending', dispatchedAt: null },
+    });
+
+    // The third delivery must happen and fail. Asserted on the CALL COUNT, not on
+    // the row reaching `pending_retry`: BullMQ's backoff applies only BETWEEN
+    // attempts of one job, so a newly-added retry job runs its first attempt
+    // immediately. Post-fix the row therefore goes pending_retry -> recovered in
+    // milliseconds, which a 500ms poll reliably misses — an intermediate-state
+    // assertion here passes only while the bug is present, which is precisely
+    // backwards. `calls` is monotonic, so it cannot be missed.
+    expect(await waitFor(async () => calls >= 3)).toBe(true);
+
+    // ...and THIS is the assertion the bug broke: a retry must actually be
+    // scheduled for the revived row, so the fourth delivery happens and it
+    // recovers a second time.
+    expect(await waitFor(async () => (await findRow())?.status === 'recovered', 30000)).toBe(true);
+    // A fourth delivery must have happened — that is what "a retry was actually
+    // scheduled" means observably. Pre-fix this stalls at 3 and the wait above
+    // times out, so the test stays decisive without pinning an exact count.
+    expect(calls).toBeGreaterThanOrEqual(4);
+
+    const secondEpisode = await findRow();
+    // Same row throughout — which is precisely why the jobId collided. If this
+    // ever becomes two rows, the dedupe reasoning above no longer applies and
+    // this test is testing something else.
+    expect(secondEpisode?.id).toBe(firstEpisode?.id);
+    expect(await prisma.failedEventDelivery.count({ where: { outboxEventId } })).toBe(1);
+  }, 90000);
 });
