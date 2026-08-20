@@ -44,7 +44,11 @@ export class AuditSubscriber implements OnModuleInit {
   ) {}
 
   onModuleInit(): void {
-    this.dispatcher.registerGlobal((event) => this.handle(event));
+    // The name is persisted as failed_event_deliveries.subscriber_name and is
+    // the key used to redeliver a failed audit write to THIS subscriber alone.
+    // Kept as a literal, not AuditSubscriber.name, so renaming the class can
+    // never silently orphan stored retry rows.
+    this.dispatcher.registerGlobal((event) => this.handle(event), 'AuditSubscriber');
   }
 
   private async handle(event: DomainEvent): Promise<void> {

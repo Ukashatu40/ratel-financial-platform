@@ -133,14 +133,108 @@ as literal per-field old/new values implied by the original schema design.
 pass forward an explicit diff — a materially larger change touching every
 aggregate, not just the audit subscriber.
 
-### 9. Failed event delivery to one subscriber is only logged, not retried
-**Where:** `DomainEventDispatcher.dispatch()`
-**What:** Uses `Promise.allSettled` across handlers so one failing subscriber
-doesn't block others — but a failed subscriber's failure is only logged, not
-retried or sent to a dead-letter queue. If Audit's DB write fails
-transiently, that audit entry is silently lost.
-**To close:** Apply the same DLQ pattern already designed for the Integration
-Layer (Phase 8.3) to per-subscriber dispatch failures.
+### 9. ~~Failed event delivery to one subscriber is only logged, not retried~~ — RESOLVED
+**Why this mattered more than the original wording suggested:** `AuditSubscriber`
+is registered globally, so it is the only thing writing the audit trail, for
+every event. A single transient failure in its DB write removed a financial
+event from the record permanently — and **undetectably**, because the hash chain
+links each entry to the previous one and therefore proves entries were not
+ALTERED. A chain that is simply missing an entry is still a perfectly valid
+chain. Tamper-evidence catches modification, never omission. That is the same
+guarantee #4 (append-only grant) exists to protect, breached from the other
+direction. The same silence also let `ExpenseReadModelProjector` drift the
+reporting read model away from the source of truth, and let
+`NotificationSubscriber` drop a payslip-ready notification.
+
+Two related facts made it invisible: `outbox_events.status = 'dispatched'` was
+set even when a subscriber failed (so the enum's `failed` member was never
+used), and `DomainEventDispatcher` plus `OutboxDispatchService` had **zero test
+coverage** between them.
+
+**Subscriber identity first, because it is the load-bearing prerequisite.**
+Subscribers registered anonymous closures, so failures were logged as
+`Handler 2` — an index into a runtime array, useless as a diagnostic and
+unusable as a retry key. `register()`/`registerGlobal()` now take a subscriber
+name (5 call sites, 3 subscribers), and `dispatch()` returns named failures
+instead of swallowing them. `Promise.allSettled` isolation is unchanged. Names
+are string LITERALS, not `SomeClass.name`, because the value is persisted —
+deriving it from a class name would mean a later rename silently orphans stored
+retry rows. Duplicate names are rejected at boot rather than discovered when a
+retry picks the wrong handler.
+
+**Retry is per-(event, subscriber), never per-event.** `NotificationSubscriber`
+enqueues email, so re-dispatching a whole event to recover one failed subscriber
+would re-run the ones that already succeeded and send duplicates. New
+`dispatchTo(name, event)` resolves the handler registered for that event's type
+and re-invokes only it; an unknown name throws loudly rather than silently
+no-op'ing, which would otherwise mark a delivery recovered that never happened.
+
+New `failed_event_deliveries` table (naming follows `failed_import_records`),
+unique on `(outboxEventId, subscriberName)` so retries update one row instead of
+accumulating history that makes "is this still broken?" unanswerable. Redelivery
+runs on a BullMQ queue with 5 attempts on exponential backoff from 5s, and the
+terminal attempt logs `PERMANENTLY FAILED, no more retries`, matching #34's
+wording. Failures are **persisted before** the enqueue, so a queue outage
+degrades to "recorded but not auto-retried" rather than losing the failure —
+which is the class of silent loss this whole item is about.
+
+Design decisions worth recording, since each had a defensible alternative:
+- **The outbox row still says `dispatched` even when a subscriber failed.** That
+  status means "handed to the dispatcher"; one event has N per-subscriber
+  outcomes, which a single column cannot express. Adding `partially_dispatched`
+  would still not say WHICH subscriber failed, so the separate table is needed
+  either way — and two sources of truth would need keeping in sync.
+- **No foreign key to `OutboxEvent`.** A cascade would let a future outbox
+  retention job silently delete the record of a permanently-lost audit entry,
+  which is exactly the evidence an operator needs. The redelivery worker instead
+  handles "outbox row is gone" explicitly by marking the delivery permanently
+  failed with `payload unrecoverable`.
+- **`OutboxDispatchService` schedules retries through a port**, not an injected
+  BullMQ `Queue`, preserving its documented property of having zero BullMQ
+  imports — the entire reason it exists separately from `OutboxDispatchProcessor`.
+- **Event reconstruction moved into a shared `toDomainEvent` mapper.** Two
+  callers now rebuild the event from its outbox row (first delivery, and retry);
+  reconstructing it separately in each would be the silent-drift risk #22/#37
+  closed, and would hand a retrying subscriber a subtly different event.
+
+**Two real bugs were caught by actually running this, not by review:**
+1. **BullMQ rejects a custom `jobId` containing `:`** (`Custom Id cannot contain
+   :` — it uses colons for Redis key namespacing). The dedupe key was
+   `redeliver:${id}`, so every enqueue threw. The failure was caught and logged
+   as "could not enqueue its retry", which meant retries were **silently never
+   scheduled while everything else looked healthy** — the e2e test is the only
+   thing that would ever have surfaced it. Now `redeliver-${id}`.
+2. **`attempts` under-counted on exactly the rows that matter most.** Manual
+   verification showed a permanently-failed delivery reporting `attempts=4` after
+   6 real delivery attempts: the redelivery counter overwrote the original
+   delivery's count, and `markPermanentlyFailed` left the value stale. `attempts`
+   now means total deliveries (original + redeliveries) and is written on both
+   the recovered and permanently-failed transitions.
+
+**Verification.** 33 new tests: unit coverage for the dispatcher (15), the
+redelivery service (7), the redelivery processor's terminal-attempt logic (6 —
+unreachable in e2e without waiting out 75s of backoff), and
+`OutboxDispatchService` (7, its first ever). Integration coverage (6) for the
+compound-unique upsert behaviour, which is a DB guarantee a fake Prisma client
+would happily fake — the same reasoning #7 applied to the audit chain. Three e2e
+tests register a deliberately-flaky subscriber into the REAL dispatcher of the
+REAL booted app and let the real poller, real queue and real Postgres run,
+including the isolation control: `AuditSubscriber` must have written exactly ONE
+entry even though the flaky subscriber was invoked twice, which is the
+duplicate-email guarantee asserted through production code.
+
+Manually verified against docker-compose, mirroring #35's stop-Mailpit-and-retry
+approach: renamed `audit_log_entries` out from under the app, emitted a real
+event, watched the failure get recorded and retried at exactly the configured
+backoff (+5s, +10s, +20s, +40s), renamed the table back mid-backoff, and watched
+a retry succeed — `status: recovered, attempts: 5`, with the audit entry that
+would previously have been lost present in the table and the chain intact (41
+entries, 41 distinct hashes). Also confirmed the permanent path: left the table
+broken and watched all 5 attempts exhaust into `permanently_failed`.
+
+**Deliberately left open — see #47** for the operator-facing surface
+(`GET /event-deliveries`, `POST /event-deliveries/:id/retry`), which needs a new
+permission and therefore a seed row plus a re-seed.
 
 ---
 
@@ -513,19 +607,38 @@ So: 15 concurrent ts-jest TypeScript compilations on 16 cores contend badly
 enough that some workers miss Jest's teardown grace period and get
 force-exited.
 
-**Fix:** `maxWorkers: '50%'` in `test/jest.unit.config.js` — the same
-treatment the integration and e2e configs already give `maxWorkers`, for their
-own different reason. A percentage rather than a fixed number so a smaller CI
-box doesn't end up serialized.
+**Fix:** an absolute `maxWorkers` cap in `test/jest.unit.config.js`
+(`Math.max(2, Math.min(4, cpus - 1))`) — the same treatment the integration and
+e2e configs already give `maxWorkers`, for their own different reason.
 
-**This is not `forceExit` and not masking anything.** The measurement is the
-justification: the full unit suite runs in **~11s capped vs ~25s uncapped**, so
-the cap is a 2.3x speedup that also happens to remove the warning — worth
-doing even if the warning had never existed. A genuine handle leak would still
-surface (as a hang, or via `--detectOpenHandles`) at any worker count.
+**CORRECTION — the first attempt at this fix was wrong, and regressed within the
+same day.** It set `maxWorkers: '50%'` (8 workers here) on the strength of a
+warm-cache measurement, and the warning came back the moment three spec files
+were added for #9. Re-measured properly, the trigger is a **cold ts-jest cache**,
+which is what CI does on every run:
 
-Verified: `npm test` now runs 220/220 green in ~11s with zero warnings, three
-runs in a row.
+|            | cold cache      | warm cache  |
+|------------|-----------------|-------------|
+| 8 workers  | 37s, **WARNS**  | 14s, clean  |
+| 4 workers  | 16s, clean      | 9s, clean   |
+
+So the original claim ("a 2.3x speedup that happens to also fix the warning") was
+half right: capping does speed the suite up, but 50% never fixed the warning at
+all in the state that matters — it only raised the threshold until the suite grew
+past it again. Fewer workers win because ts-jest compilation is
+memory-bandwidth-bound, not CPU-bound, so the low cap is faster in BOTH cache
+states as well as quiet.
+
+Two lessons folded into the config: measure the **cold** path, since that is CI's
+only path; and use an **absolute** cap rather than a percentage, because a
+percentage silently scales with the machine and with suite size, which is exactly
+how the first attempt regressed unnoticed. Floored at 2 so a small CI box isn't
+fully serialized.
+
+**This is still not `forceExit` and not masking a leak** — `--detectOpenHandles`
+reports none, no single spec reproduces the warning in isolation, and `src/`
+contains no timers at all. Verified: `npm test` runs 254/254 green with zero
+warnings, cold (17s) and warm (7s).
 
 ---
 
@@ -883,10 +996,42 @@ removed while closing #25).
 
 ---
 
-*Last updated: 2026-08-19, after closing #21 (payroll GET :id response shape,
-including a live bug it was hiding), #25 (CSV upload file-type/content
-validation), #27's remaining config-visibility half, #28 (Jest worker
-warning — diagnosed as worker-pool CPU contention, fixed with a `maxWorkers`
-cap that also made the unit suite 2.3x faster), #43 (`DELETE` for saved column
-mappings, hard delete decided explicitly) and #44 (`ImportJob.failureReason`).
-Filed #46 for a completely broken `npm run lint` found while verifying those.*
+## Event Pipeline — Follow-ups
+
+### 47. No operator-facing surface for failed event deliveries
+**Where:** `failed_event_deliveries` has no API; only the redelivery worker and
+psql can see it.
+**What:** #9 makes a lost delivery durable, automatically retried, and visible in
+logs — but a `permanently_failed` row is currently reachable only by an engineer
+with database access. There is no `GET /event-deliveries?status=permanently_failed`
+to list what was lost, and no `POST /event-deliveries/:id/retry` to redrive one
+after fixing the underlying cause (e.g. the DB came back). Today that means
+manually re-inserting a queue job or an `UPDATE`.
+**Why acceptable so far:** The severe half of #9 is closed — a failure is no
+longer silently discarded, and the common case (a transient blip) now recovers by
+itself without anyone noticing. What is missing is the recovery path for the
+*uncommon* case where automatic retries exhaust, which is precisely the shape of
+gap #35 closed for notifications after #33/#34 made failures visible.
+**Deliberately deferred rather than folded into #9:** it needs a new permission,
+which per critical convention #2 means a seed row in
+`prisma/seed/fixtures/role-permissions.ts` **and** re-running
+`npm run prisma:seed` — otherwise every call 403s confusingly. Choosing that
+permission's name and scope is a decision worth making on its own rather than as
+a side effect.
+**To close:** `GET /event-deliveries` (filterable by status) and
+`POST /event-deliveries/:id/retry`, mirroring `NotificationController`'s existing
+shape from #33/#35 — the retry endpoint can call the same
+`EventDeliveryRetryScheduler` port the dispatcher already uses, so no new
+mechanism is required, only the endpoint, the permission and its seed row.
+
+---
+
+*Last updated: 2026-08-19, after closing #9 (per-subscriber delivery failure
+tracking + automatic redelivery — including two bugs found only by running it: a
+BullMQ `jobId` colon restriction that silently prevented every retry from being
+enqueued, and an `attempts` under-count on permanently-failed rows). Filed #47
+for the operator-facing retry surface deliberately left open. Also **corrected
+#28**, whose first fix was calibrated on a warm-cache measurement and regressed
+the same day — the real trigger is a cold ts-jest cache, which is CI's only path.
+Earlier the same day: #21, #25, #27, #43, #44, and #46 filed for a completely
+broken `npm run lint`.*

@@ -31,7 +31,11 @@ export class ExpenseReadModelProjector implements OnModuleInit {
 
   onModuleInit(): void {
     PROJECTED_EVENT_TYPES.forEach((type) =>
-      this.dispatcher.register(type, (e) => this.projectFromSource(e)),
+      this.dispatcher.register(
+        type,
+        (e) => this.projectFromSource(e),
+        'ExpenseReadModelProjector',
+      ),
     );
   }
 
