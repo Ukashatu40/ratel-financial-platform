@@ -71,10 +71,27 @@ describe('Expense lifecycle (e2e)', () => {
       },
     });
 
+    // Org-scoped approver, needed for the two-step chain a large expense
+    // resolves to (ExpenseApprovalPolicy's finance_director branch). Granting
+    // finance_director its own permission gives department_head nothing extra,
+    // so the cross-department 403 test below is unaffected.
+    const financeDirector = await prisma.user.create({
+      data: { email: 'findir@e2e.test', passwordHash },
+    });
+    await prisma.userRoleAssignment.create({
+      data: {
+        userId: financeDirector.id,
+        organizationId: orgId,
+        role: 'finance_director',
+        departmentId: null,
+      },
+    });
+
     await prisma.rolePermission.createMany({
       data: [
         { role: 'employee', permission: 'expense:create', scope: 'own' },
         { role: 'department_head', permission: 'expense:approve', scope: 'department' },
+        { role: 'finance_director', permission: 'expense:approve', scope: 'organization' },
       ],
     });
   });
@@ -324,6 +341,80 @@ describe('Expense lifecycle (e2e)', () => {
 
       const prisma = getE2eDbClient();
       const dbExpense = await prisma.expense.findFirstOrThrow({ where: { id: createRes.body.id } });
+      expect(dbExpense.status).toBe('approved');
+    });
+  });
+
+  describe('approval chain thresholds (TECH_DEBT #10)', () => {
+    /** Kobo for a naira figure — the DTO takes minor units, never naira. */
+    const naira = (amount: number) => amount * 100;
+
+    async function createAndSubmit(amountMinorUnits: number): Promise<string> {
+      const employeeToken = await loginAs('employee@e2e.test');
+
+      const createRes = await request(server)
+        .post('/api/v1/expenses')
+        .set('Authorization', `Bearer ${employeeToken}`)
+        .send({
+          sourceType: 'employee',
+          amountMinorUnits,
+          currency: 'NGN',
+          categoryId,
+          departmentId: deptId,
+          expenseDate: '2026-08-02',
+        })
+        .expect(201);
+
+      await request(server)
+        .post(`/api/v1/expenses/${createRes.body.id}/submit`)
+        .set('Authorization', `Bearer ${employeeToken}`)
+        .expect(201);
+
+      return createRes.body.id;
+    }
+
+    it('requires a SECOND finance_director approval above the ₦500,000 threshold', async () => {
+      // First coverage anywhere of ExpenseApprovalPolicy's two-step branch —
+      // resolveChain() was never invoked by any test before this.
+      const prisma = getE2eDbClient();
+      const expenseId = await createAndSubmit(naira(600_000));
+
+      // Step 1 of 2: the department head's approval must NOT complete it.
+      const deptHeadToken = await loginAs('depthead@e2e.test');
+      await request(server)
+        .post(`/api/v1/expenses/${expenseId}/approve`)
+        .set('Authorization', `Bearer ${deptHeadToken}`)
+        .expect(201);
+
+      let dbExpense = await prisma.expense.findFirstOrThrow({ where: { id: expenseId } });
+      expect(dbExpense.status).toBe('pending_approval');
+
+      // Step 2 of 2: finance_director closes the chain.
+      const financeDirectorToken = await loginAs('findir@e2e.test');
+      await request(server)
+        .post(`/api/v1/expenses/${expenseId}/approve`)
+        .set('Authorization', `Bearer ${financeDirectorToken}`)
+        .expect(201);
+
+      dbExpense = await prisma.expense.findFirstOrThrow({ where: { id: expenseId } });
+      expect(dbExpense.status).toBe('approved');
+    });
+
+    it('completes on department_head approval alone at ₦100,000 (threshold is ₦500,000, not ₦50,000)', async () => {
+      // The regression control for the 10x defect. ₦100,000 sits BETWEEN the
+      // buggy ₦50,000 threshold and the real ₦500,000 one, so under the old
+      // constant this expense wrongly required a second approval and would
+      // still be 'pending_approval' at the end of this test.
+      const prisma = getE2eDbClient();
+      const expenseId = await createAndSubmit(naira(100_000));
+
+      const deptHeadToken = await loginAs('depthead@e2e.test');
+      await request(server)
+        .post(`/api/v1/expenses/${expenseId}/approve`)
+        .set('Authorization', `Bearer ${deptHeadToken}`)
+        .expect(201);
+
+      const dbExpense = await prisma.expense.findFirstOrThrow({ where: { id: expenseId } });
       expect(dbExpense.status).toBe('approved');
     });
   });

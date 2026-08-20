@@ -240,12 +240,98 @@ permission and therefore a seed row plus a re-seed.
 
 ## Domain / Business Logic
 
-### 10. `createAdjustment` re-approval threshold is a guess, not confirmed policy
-**Where:** `ExpenseAdjustmentApprovalPolicy`
-**What:** ₦1,000,000 threshold for requiring re-approval on an adjustment was
-chosen as "higher than the finance-director threshold" reasoning, not a
-number Ratel-Plus actually specified.
-**To close:** Confirm the real policy and adjust the constant.
+### 10. Expense approval thresholds were 10x too small — MAGNITUDE RESOLVED, business figure still OPEN
+**Where:** `ExpenseAdjustmentApprovalPolicy`, `ExpenseApprovalPolicy`
+
+**Originally filed** as "the ₦1,000,000 re-approval threshold is a guess, not
+confirmed policy" — chosen by "higher than the finance-director threshold"
+reasoning rather than a number Ratel-Plus specified. That business question is
+still open (see the bottom of this entry). But reviewing this item turned up a
+straightforward defect underneath it, in code, which is what actually got fixed.
+
+**Both threshold constants were exactly 10x smaller than their own comments
+stated**, from the same mistake — one digit short in the `<naira>_00` kobo
+grouping. JS ignores numeric separators, so `50_000_00n` is the 7-digit
+`5000000`, where ₦500,000 needs the 8-digit `50000000`:
+
+| Constant | Was | Actually meant | Claimed |
+|---|---|---|---|
+| `ExpenseApprovalPolicy.FINANCE_DIRECTOR_THRESHOLD_MINOR_UNITS` | `50_000_00n` = ₦50,000 | `500_000_00n` | "₦500,000 in kobo" |
+| `ExpenseAdjustmentApprovalPolicy.REAPPROVAL_THRESHOLD_MINOR_UNITS` | `100_000_00n` = ₦100,000 | `1_000_000_00n` | "₦1,000,000" |
+
+**The finance-director threshold was never flagged by this item at all** — the
+original entry named only the adjustment policy. It is the more consequential of
+the two: `SubmitExpenseHandler` resolves the chain through
+`ExpenseApprovalPolicy.resolveChain()`, and `ApproveExpenseHandler` only calls
+`expense.approve()` when `isFinalApproval` is true, so **every expense from
+₦50,000 to ₦500,000 was escalated to a second finance-director approval** and
+sat in `pending_approval` after its department head signed off. It failed
+*closed* — over-restrictive, never a bypass — so this is a wrong financial
+control rather than a security hole, but it was wrong by an order of magnitude
+in the single most-used approval path in the system.
+
+**Why it shipped, which is the part worth fixing properly.** Neither policy
+class was referenced by a single spec file. `approval-chain.spec.ts` and
+`workflow-engine.spec.ts` both hand-construct chains via
+`ApprovalChain.of([...])`, so `resolveChain()` had **never been invoked by any
+test**, and its two-step branch had never executed in CI. Every existing test
+amount was ₦10–₦1,500 — below even the buggy threshold — so no test could have
+noticed. That is the same failure mode as #21 (an untyped, untested projection
+shipping broken); a constant that only a human comment validates is the same
+class of risk as a return type of `any`.
+
+**Fixed, and pinned so it cannot recur silently:**
+- Both literals corrected. Boundary semantics deliberately unchanged
+  (`< THRESHOLD` for the chain, `>= THRESHOLD` for the adjustment, so *at*
+  threshold escalates in both).
+- Two new unit spec files (17 tests) — the first coverage either class has ever
+  had. Both express every amount in **naira** via a local
+  `naira = (amount: bigint) => amount * 100n` helper and convert, so the kobo
+  relationship is asserted rather than implied. A bare kobo literal in a test
+  would let the identical missing-digit mistake pass again, which is exactly how
+  this shipped.
+- Named regression pins (`sets the escalation point at ₦500,000, NOT ₦50,000`)
+  so the intent is greppable from failure output rather than inferable only from
+  the number.
+- The exact resolved step objects are asserted, not just chain length, so a
+  future widening of either chain must change an expectation deliberately —
+  #21's discipline.
+- Negative adjustments (the `absolute` branch, for reversals) are now covered;
+  nothing touched them before.
+- Two e2e tests in `expense-lifecycle.e2e.spec.ts`, including the control that
+  proves the fix does something: a ₦100,000 expense sits **between** the buggy
+  and the real threshold, so department-head approval alone must complete it.
+  That test was written first and **observed failing** (`pending_approval`)
+  against the old constant before either literal was touched. The companion test
+  is the first end-to-end exercise of the two-step chain anywhere — a ₦600,000
+  expense must stay `pending_approval` after its department head approves, then
+  reach `approved` only once a `finance_director` does.
+- Also removed `DEPARTMENT_HEAD_THRESHOLD = 0n` from `ExpenseApprovalPolicy`:
+  declared, never read, and misleading because it implied a consulted threshold.
+
+**No backfill, decided explicitly.** The chain is resolved at submit time and
+persisted by `progressRepo.initialize(...)`, so expenses already in
+`pending_approval` keep the 2-step chain they were given and will still require
+a finance-director approval even where the corrected threshold says one step
+would do. Accepted rather than migrated: no production data exists yet. If this
+is ever fixed after real rows exist, those in-flight rows need an explicit
+decision, not a silent re-resolve — re-resolving a chain mid-approval would
+discard approvals already recorded against it.
+
+**Still open — the original business question.** ₦500,000 and ₦1,000,000 are now
+implemented faithfully, but they remain the figures *this codebase assumed*, not
+ones Ratel-Plus confirmed. **To close:** confirm both with the business and
+adjust the two constants (and the two spec files' expectations, deliberately).
+
+### 10b. Only `ExpenseApprovalPolicy` branches on amount; payroll does not
+**Where:** `PayrollApprovalPolicy`
+**What:** Checked while fixing #10, and recorded so the asymmetry isn't mistaken
+for the same bug: `PayrollApprovalPolicy` has no threshold constants at all and
+resolves a single `finance_director` step regardless of run total, deliberately
+("payroll's sensitivity comes from what it contains, not its size"). There was
+no 10x defect to fix there. Noted only because a reader finding #10 would
+reasonably wonder whether payroll shared the flaw.
+
 
 ### 11. `PayrollRun.reject()` returns to `draft`, not a terminal `rejected` state
 **Where:** `PayrollRun` aggregate.
@@ -966,33 +1052,51 @@ decision — if the layout later changes, this one line changes with it.
 
 ## Tooling
 
-### 46. `npm run lint` cannot run at all — no ESLint config exists
-**Where:** `package.json`'s `lint` script; the missing `eslint.config.js`.
-**What:** `npm run lint` fails immediately with `ESLint couldn't find an
-eslint.config.(js|mjs|cjs) file`. There is no ESLint configuration anywhere in
-the repo — no flat config, no legacy `.eslintrc.*` — despite `eslint@10`,
-`@eslint/js`, `typescript-eslint` and `eslint-config-prettier` all being
-installed and a `lint` script existing to invoke them. So the project has
-never been linted, and the script has presumably always been broken.
-**Found:** while trying to lint the files changed for #21/#25/#27/#43/#44 —
-the same way #45's broken `start` script was found, by actually running the
-script rather than assuming it worked.
-**Why it wasn't fixed alongside those items:** authoring a config from scratch
-means choosing a rule set and then absorbing however many pre-existing
-violations it surfaces across the whole codebase in one commit. That is a
-deliberate, separately-reviewable piece of work, not a side effect of closing
-unrelated debt items — folding it in would have buried five focused changes
+### 46. `npm run lint` runs now, but the codebase has never been linted clean
+**Where:** `eslint.config.mjs`; `package.json`'s `lint` script.
+
+**CORRECTION — this entry was stale.** It previously said "`npm run lint` fails
+immediately" and "there is no ESLint configuration anywhere in the repo — no flat
+config, no legacy `.eslintrc.*`". A 13-line flat `eslint.config.mjs` was added in
+commit `b4af661` (`@eslint/js` recommended + `typescript-eslint` recommended +
+`eslint-config-prettier` last, ignoring `dist`/`coverage`/`node_modules`/
+`generated`) — exactly what the "to close" below prescribed for the config half.
+So the script runs. Leaving the entry claiming otherwise was actively misleading,
+which is the only reason it's being corrected as part of an unrelated piece.
+
+**What is still open** is the second half, which is the larger half:
+`npx eslint "src/**/*.ts"` currently reports **65 errors and 5 warnings** across
+`src`. Dominated by `@typescript-eslint/no-explicit-any`, plus two
+`no-useless-assignment` hits (`cash-outflow.handler.ts`,
+`aes-gcm-envelope-crypto.ts`) that are worth reading individually rather than
+silencing, and one unused `eslint-disable` directive in `tracing.ts`.
+
+**One config gap found while linting the #10 changes:** the flat config sets no
+`argsIgnorePattern`, so `@typescript-eslint/no-unused-vars` flags this codebase's
+deliberate `_`-prefixed unused parameters — e.g.
+`requiresApproval(amountMinorUnits, _reason)` in
+`ExpenseAdjustmentApprovalPolicy`, where the prefix is the convention *signalling*
+the parameter is intentionally unused. That is a config bug, not 65 real defects:
+whoever closes this should add
+`argsIgnorePattern: '^_'` (and `varsIgnorePattern: '^_'`) before counting
+violations, or the count is inflated by the codebase following its own convention.
+
+**Why it still isn't fixed here:** unchanged from the original reasoning —
+absorbing a repo-wide sweep of 65 violations is a deliberate, separately
+reviewable piece, not a side effect of closing unrelated debt. Folding it into
+the #10 threshold fix would have buried a four-line financial-control correction
 under a repo-wide reformat.
-**To close:** Add a flat `eslint.config.js` (`@eslint/js` recommended +
-`typescript-eslint` + `eslint-config-prettier` last, matching what's already
-installed), run it, and fix or explicitly disable what it finds — as its own
-piece of work. Two rules worth enabling deliberately while doing so, because
-they would each have caught a real bug in this codebase:
-`@typescript-eslint/no-unused-expressions` (which is exactly what #21's
-labelled-statement bug was) and `no-unused-vars` (which would have caught the
-dead `const rawContent = buffer.toString('utf8')` left in
-`ImportController.create()` after #23 moved content to object storage,
-removed while closing #25).
+
+**To close:** add the `^_` ignore patterns, re-count, then fix or explicitly
+disable what genuinely remains — as its own piece of work. The two rules the
+original entry flagged as worth enabling deliberately are still worth it, because
+each would have caught a real bug here:
+`@typescript-eslint/no-unused-expressions` (exactly #21's labelled-statement bug)
+and `no-unused-vars` (the dead `const rawContent = buffer.toString('utf8')` left
+in `ImportController.create()` after #23). Note that neither is currently
+catching a *threshold* mistake like #10's — no lint rule can; that needs the unit
+coverage #10 added.
+
 
 ---
 
@@ -1026,7 +1130,22 @@ mechanism is required, only the endpoint, the permission and its seed row.
 
 ---
 
-*Last updated: 2026-08-19, after closing #9 (per-subscriber delivery failure
+*Last updated: 2026-08-20, after fixing #10 — both expense approval threshold
+constants were exactly 10x smaller than their own comments stated (`50_000_00n`
+is ₦50,000, not ₦500,000), so every expense from ₦50,000 to ₦500,000 was
+wrongly escalated to a second finance-director approval. Found by reading the
+constants while reviewing #10, not by any test: neither `ExpenseApprovalPolicy`
+nor `ExpenseAdjustmentApprovalPolicy` was referenced by a single spec, and
+`resolveChain()` had never been invoked in CI. Fixed both literals and added the
+first coverage either class has had (17 unit tests + 2 e2e), with the e2e control
+observed failing against the old constant before anything was changed. The
+business figures themselves remain unconfirmed — #10 stays open for that. Filed
+#10b so payroll's deliberate lack of amount branching isn't mistaken for the same
+bug. Also **corrected #46**, which claimed no ESLint config existed anywhere;
+`eslint.config.mjs` landed in `b4af661` and the real remaining work is 65 errors /
+5 warnings, inflated by a missing `argsIgnorePattern: '^_'`.*
+
+*Previously: 2026-08-19, after closing #9 (per-subscriber delivery failure
 tracking + automatic redelivery — including two bugs found only by running it: a
 BullMQ `jobId` colon restriction that silently prevented every retry from being
 enqueued, and an `attempts` under-count on permanently-failed rows). Filed #47
