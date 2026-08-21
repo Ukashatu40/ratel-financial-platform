@@ -71,16 +71,17 @@ describe('EventRedeliveryService', () => {
   it('redelivers to the recorded subscriber and marks it recovered', async () => {
     const { service, dispatchTo, failures } = build();
 
-    const outcome = await service.redeliver('failure-1', 2);
+    const outcome = await service.redeliver('failure-1');
 
     expect(outcome.recovered).toBe(true);
     expect(dispatchTo).toHaveBeenCalledWith(
       'AuditSubscriber',
       expect.objectContaining({ type: 'ExpenseApproved', aggregateId: 'exp-1' }),
     );
-    // Total attempts recorded on recovery too, so a recovered row shows how many
-    // tries it actually took rather than freezing at the first failure.
-    expect(failures.markRecovered).toHaveBeenCalledWith('failure-1', 2);
+    // No count passed: `attempts` is incremented by the row's own writer, so a
+    // recovery counts as one more delivery attempt rather than overwriting the
+    // running total with a number derived from the current job.
+    expect(failures.markRecovered).toHaveBeenCalledWith('failure-1');
   });
 
   it('rebuilds the event through the shared mapper, including outbox-only context', async () => {
@@ -134,9 +135,14 @@ describe('EventRedeliveryService', () => {
     expect(outcome.recovered).toBe(false);
     expect(outcome.abandonedReason).toContain('unrecoverable');
     expect(dispatchTo).not.toHaveBeenCalled();
+    // countsAsAttempt: false is the load-bearing part. The subscriber was never
+    // invoked here — there is no payload to deliver — so this must not increment
+    // `attempts`. It is the ONLY caller that opts out, and #47 surfaces that number
+    // to operators, so inflating it here would misreport how hard the system tried.
     expect(failures.markPermanentlyFailed).toHaveBeenCalledWith(
       'failure-1',
       expect.objectContaining({ message: expect.stringContaining('no longer exists') }),
+      { countsAsAttempt: false },
     );
   });
 

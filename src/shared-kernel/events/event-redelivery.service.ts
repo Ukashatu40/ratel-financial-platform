@@ -35,7 +35,7 @@ export class EventRedeliveryService {
    * unrecoverable and retrying would only burn attempts. That distinction is
    * the whole contract: BullMQ drives retries off the throw.
    */
-  async redeliver(failedDeliveryId: string, totalAttempts?: number): Promise<RedeliveryOutcome> {
+  async redeliver(failedDeliveryId: string): Promise<RedeliveryOutcome> {
     const record = await this.prisma.failedEventDelivery.findUnique({
       where: { id: failedDeliveryId },
     });
@@ -65,7 +65,12 @@ export class EventRedeliveryService {
       // handle its absence explicitly instead of leaning on referential
       // integrity. Without the payload there is nothing to redeliver, ever.
       const reason = `outbox event ${record.outboxEventId} no longer exists — payload unrecoverable`;
-      await this.failures.markPermanentlyFailed(record.id, new Error(reason));
+      // countsAsAttempt: false — the subscriber was never invoked, so this is not a
+      // delivery attempt. Counting it would inflate `attempts`, which #47 now shows
+      // operators directly.
+      await this.failures.markPermanentlyFailed(record.id, new Error(reason), {
+        countsAsAttempt: false,
+      });
       this.logger.error(
         `Cannot redeliver ${record.eventType} to "${record.subscriberName}": ${reason}`,
       );
@@ -80,7 +85,7 @@ export class EventRedeliveryService {
     // propagate so the processor can count the attempt and let BullMQ back off.
     await this.dispatcher.dispatchTo(record.subscriberName, event);
 
-    await this.failures.markRecovered(record.id, totalAttempts);
+    await this.failures.markRecovered(record.id);
     this.logger.log(
       `Recovered event delivery: subscriber "${record.subscriberName}" processed ` +
         `${record.eventType} (outbox event ${record.outboxEventId}) after ${record.attempts} failed attempt(s)`,

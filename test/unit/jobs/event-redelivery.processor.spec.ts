@@ -47,7 +47,7 @@ describe('EventRedeliveryProcessor', () => {
 
     await processor.process(buildJob(0));
 
-    expect(redeliver).toHaveBeenCalledWith('failure-1', 2); // 1 original + this redelivery
+    expect(redeliver).toHaveBeenCalledWith('failure-1');
     expect(failures.markPermanentlyFailed).not.toHaveBeenCalled();
     expect(failures.recordAttempt).not.toHaveBeenCalled();
   });
@@ -55,29 +55,30 @@ describe('EventRedeliveryProcessor', () => {
   it('counts the attempt and rethrows on a non-final failure, so BullMQ retries', async () => {
     const { processor, failures } = build({ redeliverThrows: new Error('still broken') });
 
-    // attemptsMade 1 -> redelivery attempt 2 of 5 -> 3 total deliveries so far
-    // (the original that created the record, plus two redeliveries).
+    // attemptsMade 1 -> redelivery attempt 2 of 5, so not terminal yet.
     await expect(processor.process(buildJob(1))).rejects.toThrow('still broken');
 
-    expect(failures.recordAttempt).toHaveBeenCalledWith('failure-1', 3, expect.any(Error));
+    expect(failures.recordAttempt).toHaveBeenCalledWith('failure-1', expect.any(Error));
     expect(failures.markPermanentlyFailed).not.toHaveBeenCalled();
   });
 
-  it('records the FINAL total when marking permanently failed', async () => {
-    // Manual verification against the live stack caught this: the row used to
-    // freeze at the second-to-last count, so a permanently-failed delivery
-    // under-reported how many attempts had actually been made — on exactly the
-    // rows an operator looks at to judge severity.
+  it('passes NO attempt count, so the row owns its own total', async () => {
+    // This processor knows only which attempt of THIS job it is on. It used to
+    // derive the row's total as `attempt + 1`, assuming exactly one prior delivery
+    // — true for a pair's first failure episode, wrong for every later one, and
+    // wrong for an operator redrive, where a row showing 6 attempts was overwritten
+    // with 2. FailedEventDeliveryService increments instead, so the count is the
+    // row's property and this processor must not supply one.
     const { processor, failures } = build({ redeliverThrows: new Error('never recovered') });
 
-    // attemptsMade 4 -> attempt 5 of 5 -> 6 total (1 original + 5 redeliveries)
+    // attemptsMade 4 -> attempt 5 of 5, the terminal one.
     await expect(processor.process(buildJob(4))).rejects.toThrow('never recovered');
 
-    expect(failures.markPermanentlyFailed).toHaveBeenCalledWith(
-      'failure-1',
-      expect.any(Error),
-      6,
-    );
+    expect(failures.markPermanentlyFailed).toHaveBeenCalledWith('failure-1', expect.any(Error));
+    // Exactly two arguments: an options object here would mean opting out of
+    // counting the attempt, which is only correct for the unrecoverable-payload
+    // path in EventRedeliveryService, never for a genuine terminal failure.
+    expect(failures.markPermanentlyFailed.mock.calls[0]).toHaveLength(2);
   });
 
   it('marks permanently failed on the FINAL attempt', async () => {

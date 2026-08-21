@@ -27,12 +27,9 @@ export class EventRedeliveryProcessor extends WorkerHost {
     const { failedDeliveryId } = job.data;
     const attempt = job.attemptsMade + 1;
     const maxAttempts = job.opts.attempts ?? 1;
-    // +1 for the original delivery that failed and created the record in the
-    // first place, so `attempts` on the row is the TOTAL, not just redeliveries.
-    const totalAttempts = attempt + 1;
 
     try {
-      const outcome = await this.redelivery.redeliver(failedDeliveryId, totalAttempts);
+      const outcome = await this.redelivery.redeliver(failedDeliveryId);
 
       if (!outcome.recovered && outcome.abandonedReason) {
         // Unrecoverable rather than failed: returning (not throwing) stops
@@ -45,10 +42,15 @@ export class EventRedeliveryProcessor extends WorkerHost {
     } catch (err) {
       const isLastAttempt = attempt >= maxAttempts;
 
+      // Neither branch is handed an attempt COUNT any more. This processor only
+      // knows which attempt of THIS job it is on, which is not the pair's total
+      // once a row has survived more than one failure episode or an operator
+      // redrive — computing `attempt + 1` here is what made `attempts` regress.
+      // FailedEventDeliveryService now increments, so the count belongs to the row.
       if (isLastAttempt) {
-        await this.failures.markPermanentlyFailed(failedDeliveryId, err, totalAttempts);
+        await this.failures.markPermanentlyFailed(failedDeliveryId, err);
       } else {
-        await this.failures.recordAttempt(failedDeliveryId, totalAttempts, err);
+        await this.failures.recordAttempt(failedDeliveryId, err);
       }
 
       this.logger.error(

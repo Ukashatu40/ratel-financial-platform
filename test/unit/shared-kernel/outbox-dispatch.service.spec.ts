@@ -109,10 +109,54 @@ describe('OutboxDispatchService', () => {
     const result = await service.dispatchPendingBatch();
 
     expect(result.failed).toBe(1);
-    expect(recordFailures).toHaveBeenCalledWith('outbox-1', 'ExpenseApproved', [
-      expect.objectContaining({ subscriberName: 'AuditSubscriber' }),
-    ]);
+    expect(recordFailures).toHaveBeenCalledWith(
+      'outbox-1',
+      'ExpenseApproved',
+      [expect.objectContaining({ subscriberName: 'AuditSubscriber' })],
+      'org-1',
+    );
     expect(scheduleRetry).toHaveBeenCalledWith('failure-0');
+  });
+
+  it('attributes the failure to the organization on the event payload', async () => {
+    // Denormalized onto failed_event_deliveries at record time so the #47 operator
+    // views can scope per organization. The table has no FK to outbox_events (#9,
+    // deliberately), so a join would stop working the moment an outbox row is
+    // retention-deleted — the payload is the only source available at write time.
+    const { service, recordFailures } = build({
+      rows: [outboxRow({ payload: { organizationId: 'org-77' } })],
+      failures: [{ subscriberName: 'AuditSubscriber', error: new Error('db down') }],
+    });
+
+    await service.dispatchPendingBatch();
+
+    expect(recordFailures).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      expect.any(Array),
+      'org-77',
+    );
+  });
+
+  it("falls back to 'unknown' when the payload carries no organizationId", async () => {
+    // Same sentinel AuditSubscriber already uses for the identical question, and a
+    // sentinel rather than a throw on purpose: recording the failure must never
+    // itself fail, which is the entire point of #9. An unattributed record beats a
+    // lost one — at the cost of not appearing in any organization's list, which is
+    // the residual gap #47 records.
+    const { service, recordFailures } = build({
+      rows: [outboxRow({ payload: {} })],
+      failures: [{ subscriberName: 'AuditSubscriber', error: new Error('db down') }],
+    });
+
+    await service.dispatchPendingBatch();
+
+    expect(recordFailures).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      expect.any(Array),
+      'unknown',
+    );
   });
 
   it('still marks the outbox row dispatched when a subscriber failed', async () => {

@@ -307,13 +307,24 @@ to get wrong again:
   exposure and is latently flaky for the same reason — not touched here, but it
   should be relaxed the same way if it ever goes red.
 
-One inconsistency noted and deliberately NOT changed: across episodes `attempts`
-accumulates on the failure path (`increment: 1`) but is then overwritten to the
-current episode's total by `markRecovered`/`markPermanentlyFailed`, so a pair
-that recovered twice reads `2` rather than `4`. Defensible under this table's
-stated purpose — it tracks "is this still broken?", not history — but the two
-writers disagree about what the column means. Left alone rather than changed
-under an unrelated fix; worth settling if #47 surfaces the number to operators.
+**`attempts` was also inconsistent, and is now fixed** — it was flagged here first
+and deliberately left, then closed once #47 made it user-visible. Across episodes
+the column accumulated on the failure path (`increment: 1`) but was then
+*overwritten* with an absolute total that `EventRedeliveryProcessor` computed as
+`thisAttempt + 1`. That arithmetic silently assumed exactly one prior delivery: true
+for a pair's first episode, wrong for every later one, and worst of all for an
+operator redrive, where a row reading `6` was rewritten to `2`. A number an operator
+consults to judge severity going *backwards* is worse than one that is merely
+approximate.
+
+`attempts` now means total delivery attempts ever made for the pair, written only
+as an increment, so the column is monotonic and the count belongs to the row rather
+than to whichever job last touched it. The processor no longer computes or passes a
+total at all. This produces the **identical** value for a first episode (1 original
++ 5 redeliveries = 6), so it corrects the uncovered cases without altering the one
+that was covered. One caller opts out — the "outbox payload is gone" path never
+invokes a subscriber, so counting it would inflate rather than correct; that opt-out
+is asserted explicitly at both the unit and integration layer.
 
 **Deliberately left open — see #47** for the operator-facing surface
 (`GET /event-deliveries`, `POST /event-deliveries/:id/retry`), which needs a new
@@ -948,22 +959,34 @@ cached per test file. A new table added in any future piece gets cleaned
 automatically — no more silent drift, closing the exact failure mode that
 already happened once (TECH_DEBT #36).
 
-### 38. Async attachment scan jobs can race against e2e test cleanup
+### 38. ~~Async attachment scan jobs can race against e2e test cleanup~~ — RESOLVED
 **Where:** e2e test teardown/setup boundary, `AttachmentScanProcessor`
-**What:** Confirmed once, harmlessly: `cleanE2eDatabase()` truncating
-`attachments` between tests can delete a row a still-in-flight scan job
-(from the previous test) is about to update, producing a caught, logged,
-retried-to-permanent-failure Prisma error (`P2025`, record not found).
-Doesn't fail any test — the orphaned scan simply fails against a target
-that's correctly gone — but adds log noise.
-**Why acceptable:** This is a test-environment-only artifact (production
-never truncates tables mid-workload); the underlying "update targets a
-possibly-deleted row" pattern already fails safely everywhere else it
-occurs in this codebase (same class of issue as the outbox dispatcher's
-`updateMany` fix from earlier in this build).
-**To close:** Low priority — could wait for pending scan jobs to settle
-between e2e tests, but the cost (log noise in test output only) doesn't
-currently justify the added test complexity.
+**What was happening:** `cleanE2eDatabase()` in `beforeEach` truncates
+`attachments`, so a scan job still in flight from the PREVIOUS test updated a row
+that no longer existed — a caught, logged, retried-to-permanent-failure Prisma
+`P2025`. It failed no test (the orphaned scan failed against a target correctly
+gone) but it put misleading errors into the output of whichever test happened to
+run next, which matters more than it sounds when reading a genuine failure.
+
+**Fixed by draining, plus removing the cause.** `attachments.e2e.spec.ts` now has
+an `afterEach` that waits for every attachment to leave `scanStatus: 'unscanned'`
+before the next test's truncation. Drained in `afterEach` rather than `beforeEach`
+so the wait is attributed to the test that actually created the work.
+
+The root enabler was also removed: this file slept a **fixed `setTimeout(5000)`
+twice** while waiting for scans. That is the same latent flake commit `f714ba1`
+had just replaced in the CSV import spec — a hard-coded wait fires whenever the
+suite gets busier, and when 5s proved insufficient the scan outlived its test,
+which is precisely how this race occurred. Both are now polled to a terminal
+`scanStatus` via a `waitForScanToSettle` helper mirroring that commit's
+`waitForJobToSettle`, so the tests are deterministic and 10s of unconditional
+sleeping is gone.
+
+The drain **warns rather than throws** on timeout, deliberately: this is cleanup
+hygiene, not an assertion. A genuinely wedged scanner should surface as the
+scan-dependent tests failing on their own assertions, not as an opaque teardown
+error on every test in the file. It does not stay silent either — silence is how
+the original noise went unexplained — so the count of unsettled scans is reported.
 
 ---
 
@@ -1135,7 +1158,7 @@ decision — if the layout later changes, this one line changes with it.
 
 ## Tooling
 
-### 46. `npm run lint` runs now, but the codebase has never been linted clean
+### 46. `npm run lint` runs, and its config is now correct, but `src` is not yet clean
 **Where:** `eslint.config.mjs`; `package.json`'s `lint` script.
 
 **CORRECTION — this entry was stale.** It previously said "`npm run lint` fails
@@ -1154,90 +1177,136 @@ which is the only reason it's being corrected as part of an unrelated piece.
 `aes-gcm-envelope-crypto.ts`) that are worth reading individually rather than
 silencing, and one unused `eslint-disable` directive in `tracing.ts`.
 
-**One config gap found while linting the #10 changes:** the flat config sets no
-`argsIgnorePattern`, so `@typescript-eslint/no-unused-vars` flags this codebase's
-deliberate `_`-prefixed unused parameters — e.g.
-`requiresApproval(amountMinorUnits, _reason)` in
-`ExpenseAdjustmentApprovalPolicy`, where the prefix is the convention *signalling*
-the parameter is intentionally unused. That is a config bug, not 65 real defects:
-whoever closes this should add
-`argsIgnorePattern: '^_'` (and `varsIgnorePattern: '^_'`) before counting
-violations, or the count is inflated by the codebase following its own convention.
+**The config gap is now FIXED, and it was a real defect, not cosmetic.** The flat
+config set no `argsIgnorePattern`, so `@typescript-eslint/no-unused-vars` flagged
+this codebase's deliberate `_`-prefixed unused parameters — e.g.
+`requiresApproval(amountMinorUnits, _reason)` in `ExpenseAdjustmentApprovalPolicy`,
+where the prefix IS the signal that ignoring it is intentional. The config now sets
+`argsIgnorePattern`, `varsIgnorePattern` and `caughtErrorsIgnorePattern` to `^_`.
 
-**Why it still isn't fixed here:** unchanged from the original reasoning —
-absorbing a repo-wide sweep of 65 violations is a deliberate, separately
-reviewable piece, not a side effect of closing unrelated debt. Folding it into
-the #10 threshold fix would have buried a four-line financial-control correction
-under a repo-wide reformat.
+Re-counted afterwards: **62 errors and 5 warnings**, down from 65 — so 3 of the
+reported errors were the codebase being penalised for following its own convention.
+The remaining 62 are real and still open, dominated by
+`@typescript-eslint/no-explicit-any`, plus two `no-useless-assignment` hits
+(`cash-outflow.handler.ts`, `aes-gcm-envelope-crypto.ts`) worth reading
+individually rather than silencing, and one unused `eslint-disable` directive in
+`tracing.ts`.
 
-**To close:** add the `^_` ignore patterns, re-count, then fix or explicitly
-disable what genuinely remains — as its own piece of work. The two rules the
-original entry flagged as worth enabling deliberately are still worth it, because
-each would have caught a real bug here:
+**Why the remaining 62 still aren't fixed here:** unchanged from the original
+reasoning — a repo-wide typing sweep is a deliberate, separately reviewable piece.
+It also is not mechanical: each `any` removed is a real typing decision, and #21
+showed exactly what those hide (a return type of `any` let a labelled-statement bug
+ship an endpoint that served `[undefined, undefined, …]` for every payroll run).
+That makes the sweep valuable but not something to bury inside unrelated work.
+
+**Noted while here, not fixed:** `@eslint/js` and `typescript-eslint` are declared
+in `dependencies` rather than `devDependencies`, so they ship to production. Wrong
+section, no runtime effect; worth correcting whenever this file is next touched.
+
+**To close:** fix or explicitly disable the remaining 62, as its own piece. The two
+rules the original entry flagged as worth enabling deliberately are still worth it,
+because each would have caught a real bug here:
 `@typescript-eslint/no-unused-expressions` (exactly #21's labelled-statement bug)
-and `no-unused-vars` (the dead `const rawContent = buffer.toString('utf8')` left
-in `ImportController.create()` after #23). Note that neither is currently
-catching a *threshold* mistake like #10's — no lint rule can; that needs the unit
-coverage #10 added.
+and `no-unused-vars` (the dead `const rawContent = buffer.toString('utf8')` left in
+`ImportController.create()` after #23). Note that neither is currently catching a
+*threshold* mistake like #10's — no lint rule can; that needs the unit coverage #10
+added.
 
 
 ---
 
 ## Event Pipeline — Follow-ups
 
-### 47. No operator-facing surface for failed event deliveries
-**Where:** `failed_event_deliveries` has no API; only the redelivery worker and
-psql can see it.
-**What:** #9 makes a lost delivery durable, automatically retried, and visible in
-logs — but a `permanently_failed` row is currently reachable only by an engineer
-with database access. There is no `GET /event-deliveries?status=permanently_failed`
-to list what was lost, and no `POST /event-deliveries/:id/retry` to redrive one
-after fixing the underlying cause (e.g. the DB came back). Today that means
-manually re-inserting a queue job or an `UPDATE`.
-**Why acceptable so far:** The severe half of #9 is closed — a failure is no
-longer silently discarded, and the common case (a transient blip) now recovers by
-itself without anyone noticing. What is missing is the recovery path for the
-*uncommon* case where automatic retries exhaust, which is precisely the shape of
-gap #35 closed for notifications after #33/#34 made failures visible.
-**Deliberately deferred rather than folded into #9:** it needs a new permission,
-which per critical convention #2 means a seed row in
-`prisma/seed/fixtures/role-permissions.ts` **and** re-running
-`npm run prisma:seed` — otherwise every call 403s confusingly. Choosing that
-permission's name and scope is a decision worth making on its own rather than as
-a side effect.
-**To close:** `GET /event-deliveries` (filterable by status) and
-`POST /event-deliveries/:id/retry`, mirroring `NotificationController`'s existing
-shape from #33/#35 — the retry endpoint can call the same
-`EventDeliveryRetryScheduler` port the dispatcher already uses, so no new
-mechanism is required, only the endpoint, the permission and its seed row.
+### 47. ~~No operator-facing surface for failed event deliveries~~ — RESOLVED
+`GET /event-deliveries` (filterable by status), `GET /event-deliveries/:id` and
+`POST /event-deliveries/:id/retry` now exist in a new `src/event-deliveries/`
+module — a top-level supporting module beside `NotificationsModule`, **not** a
+bounded context: failed deliveries are event-pipeline bookkeeping with no
+aggregate, state machine or business rules, so full DDD layering would be ceremony.
+Gated on a new `event-delivery:manage` permission, seeded for `accountant` and
+`finance_director` (the roles that already hold `notification:manage`, this item's
+closest precedent). Retry goes through the SAME `EVENT_DELIVERY_RETRY_SCHEDULER`
+port the dispatcher uses, so a manual redrive and an automatic one cannot drift.
 
-**Two prerequisites were found while scoping this, and are now cleared** (both
-recorded under #9's CORRECTION):
-1. The port was provided by `JobsModule` but not exported, so the endpoint could
-   not have injected it. Now exported.
-2. The retry would have been a **guaranteed silent no-op** — the BullMQ jobId is
-   derived from the failure row id and finished jobs were retained in Redis under
-   it, so `scheduleRetry` on an already-exhausted row enqueued nothing. Fixed.
+**The org-scoping question this item raised is settled by denormalizing.**
+`failed_event_deliveries` now carries `organizationId`, written at record time from
+the outbox payload. `NOT NULL` with an `"unknown"` default rather than nullable,
+matching what `AuditSubscriber` already does for the identical question
+(`payload['organizationId'] ?? 'unknown'`) — two different answers to the same
+question inside one event pipeline would be the silent-drift risk #22/#37 closed.
+A sentinel and not a throw because recording a failure must never itself fail,
+which is the whole point of #9: an unattributed record beats a lost one. The
+default also made the column safe to add to a table with existing rows with no
+separate backfill. It is re-asserted on UPDATE as well as CREATE, so a row created
+before the column existed gets attributed the next time that pair fails instead of
+staying permanently unlistable.
 
-**One open question, which is the real decision in this item:**
-`failed_event_deliveries` has **no `organizationId` and no FK** (the missing FK is
-deliberate — see #9). So a `GET /event-deliveries` cannot scope by organization
-the way every other list endpoint does; the owning org is reachable only through
-`outbox_events.payload->>'organizationId'`. Three options, none obviously right:
-(a) join through `outbox_events` and filter on the payload — no schema change, but
-a JSON-path filter on a table with no index for it; (b) denormalize
-`organizationId` onto the row at write time — cheapest to query, mirrors how #7b
-scoped the audit chain per organization, costs a migration and a backfill
-decision; (c) treat this as a platform-operator surface that is deliberately
-org-agnostic, gated on an organization-scoped-only permission. (c) is the least
-work and arguably the most honest — the event pipeline is infrastructure, not
-per-org business data — but it is the one choice here that should be made
-explicitly rather than defaulted into, since it decides whether this endpoint can
-ever be exposed to a customer-facing admin.
+Verified: all 17 event factories across the three contexts do include
+`organizationId`, so the sentinel is a guard rather than a common path — checked
+before committing to `NOT NULL`, not assumed.
+
+Decisions worth recording, each having had a defensible alternative:
+- **A `pending_retry` retry returns 409, not success.** A live BullMQ job already
+  exists for that row under `redeliver-<id>`, so a second enqueue would be
+  deduplicated and the operator told "requeued" while nothing happened. Here the
+  dedupe is CORRECT, so refusing is the honest answer — absorbing it would
+  reintroduce precisely the silent no-op corrected under #9.
+- **Enqueue before the status write.** If the enqueue throws, the row still says
+  `permanently_failed`, which is true. The reverse order would leave a row claiming
+  `pending_retry` with no job in existence and nothing to correct it. The other
+  direction is self-correcting: the worker resolves the row on completion anyway.
+- **Responses go through an explicit `EventDeliveryView`**, not the raw Prisma row,
+  so `organizationId` isn't echoed back to a caller that already knows it (#22's
+  reasoning). Asserted as an exact key set, so widening it must be deliberate (#21).
+- **Status filter validated at the boundary**, not passed to Prisma raw: an unknown
+  value would surface as a Prisma client error, which `ProblemDetailsFilter` can
+  only render as a useless 500 (critical convention #5). Now a specific 400 naming
+  the valid values.
+- **`auditor` deliberately NOT granted.** A permanently-failed `AuditSubscriber`
+  delivery genuinely is an auditor's concern, but this single `:manage` permission
+  bundles reading with redriving, and redelivery is an operational action rather
+  than an audit one. If read-only visibility for auditors is wanted, the right move
+  is splitting into `event-delivery:view` / `event-delivery:retry`, not widening
+  this grant.
+
+Covered by 13 e2e tests, 3 integration and 2 unit. The e2e set includes the
+controls that make a pass mean something: a 403 for a role without the permission
+(so a 200 cannot be explained by the guard never running), cross-organization 404s
+that also assert the target row was left **untouched**, and a status-filter control
+proving the filter filters rather than being ignored.
+
+One residual gap, stated rather than hidden: a row whose organization is `"unknown"`
+appears in no organization's list and is therefore reachable only via logs and psql
+— a narrow re-creation of the very gap this item closed. It requires an event whose
+payload omits `organizationId`, which none currently do. The audit log has had the
+identical property since #7b for the same reason, so this is a consistent
+consequence of the sentinel rather than a new inconsistency.
+
+**Two prerequisites had to be cleared first** (both recorded under #9's
+CORRECTION): the retry-scheduler port was provided by `JobsModule` but never
+exported, so no outside caller could inject it; and the retry would have been a
+guaranteed silent no-op, because the BullMQ jobId derives from the failure row id
+and finished jobs were retained in Redis under it. Without that second fix this
+endpoint would have returned `{requeued: true}` and done nothing.
 
 ---
 
-*Last updated: 2026-08-20. Most recently: **corrected #9** — its automatic
+*Last updated: 2026-08-20. Most recently: **closed #47** (operator API over failed
+event deliveries, in a new `src/event-deliveries/` supporting module, with
+`organizationId` denormalized onto the table and an `"unknown"` sentinel matching
+`AuditSubscriber`'s existing handling of the same question) and **#38** (attachment
+scan jobs now drained before e2e cleanup, and the two fixed `setTimeout(5000)`
+sleeps that caused the overrun replaced with settle-polling). Also **fixed the
+`attempts` counter**, which #47 turned from a latent inconsistency into a
+misleading API response: it was overwritten with an absolute total the processor
+derived as `thisAttempt + 1`, so an operator redriving a row reading `6` watched it
+drop to `2`. It is now written only as an increment, making it monotonic, with one
+explicit opt-out for the path that never invokes a subscriber. **#46's config half
+is fixed** — the missing `^_` ignore patterns were penalising the codebase's own
+convention, and the real count is 62 errors / 5 warnings, not 65; the typing sweep
+itself stays open as its own piece.*
+
+*Earlier the same day: **corrected #9** — its automatic
 redelivery only ever worked for a pair's FIRST failure. The BullMQ `jobId` is
 derived from the failure row's id, which is stable across failure episodes (the
 table is upserted on its unique pair), and finished jobs were retained in Redis
@@ -1247,11 +1316,8 @@ sat there with no job to move it. Found by reading the dedupe key while scoping
 #47, not by any test: all of #9's e2e coverage and its manual verification
 exercised exactly one failure episode per pair. Fixed with
 `removeOnComplete`/`removeOnFail`, proven by an e2e test observed failing at the
-predicted assertion with only those two options reverted. Two prerequisites for
-**#47** are now cleared (the retry-scheduler port was provided but never
-exported, and the retry would have been a guaranteed no-op), and #47 now records
-its one genuine open decision: how to scope a table that has no
-`organizationId`. Also documented two run-only findings — BullMQ's backoff never
+predicted assertion with only those two options reverted. Also documented two
+run-only findings — BullMQ's backoff never
 delays a new job's first attempt, and outbox dispatch is at-least-once, so exact
 subscriber-invocation counts are not safely assertable.*
 

@@ -2,7 +2,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { DomainEventDispatcher } from '../events/domain-event-dispatcher';
-import { FailedEventDeliveryService } from '../events/failed-event-delivery.service';
+import { FailedEventDeliveryService, organizationIdFromPayload } from '../events/failed-event-delivery.service';
 import {
   EVENT_DELIVERY_RETRY_SCHEDULER,
   EventDeliveryRetryScheduler,
@@ -80,7 +80,7 @@ export class OutboxDispatchService {
 
         if (result.failures.length > 0) {
           failed += result.failures.length;
-          await this.scheduleRetries(row.id, row.eventType, result.failures);
+          await this.scheduleRetries(row.id, row.eventType, result.failures, event.payload);
         }
       } catch (err) {
         // dispatch() itself shouldn't throw per the above, but guarding
@@ -104,8 +104,14 @@ export class OutboxDispatchService {
     outboxEventId: string,
     eventType: string,
     failures: Awaited<ReturnType<DomainEventDispatcher['dispatch']>>['failures'],
+    payload: unknown,
   ): Promise<void> {
-    const recorded = await this.failures.recordFailures(outboxEventId, eventType, failures);
+    const recorded = await this.failures.recordFailures(
+      outboxEventId,
+      eventType,
+      failures,
+      organizationIdFromPayload(payload),
+    );
 
     for (const record of recorded) {
       try {
