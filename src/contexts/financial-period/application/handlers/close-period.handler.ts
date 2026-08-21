@@ -20,7 +20,15 @@ export class ClosePeriodHandler implements CommandHandler<ClosePeriodCommand, vo
 
   async execute(cmd: ClosePeriodCommand): Promise<void> {
     return this.uow.transaction(async (tx) => {
-      const period = await this.repo.findById(cmd.periodId, tx);
+      // Org-scoped lookup, so another organization's period id is simply not
+      // found rather than closable. Until #49 this was `findById(cmd.periodId)`,
+      // which ignored the organizationId the command has always carried — so any
+      // caller holding `period:close` could close another organization's period.
+      const period = await this.repo.findByIdForOrganization(
+        cmd.periodId,
+        cmd.organizationId,
+        tx,
+      );
       if (!period) throw new EntityNotFoundError('FinancialPeriod', cmd.periodId);
 
       // NOTE: this handler only orchestrates. Whether 'open' -> 'closed' is a

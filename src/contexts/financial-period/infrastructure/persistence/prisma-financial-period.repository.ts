@@ -4,7 +4,7 @@ import { PrismaService } from '../../../../prisma/prisma.service';
 import { TransactionClient } from '../../../../shared-kernel/unit-of-work/unit-of-work.port';
 import { FinancialPeriod } from '../../domain/aggregates/financial-period.aggregate';
 import { FinancialPeriodRepository } from '../../domain/ports/financial-period-repository.port';
-import { OPEN_STATUSES } from '../../domain/value-objects/period-status';
+import { OPEN_STATUSES, PeriodStatusValue } from '../../domain/value-objects/period-status';
 
 @Injectable()
 export class PrismaFinancialPeriodRepository implements FinancialPeriodRepository {
@@ -23,6 +23,38 @@ export class PrismaFinancialPeriodRepository implements FinancialPeriodRepositor
       orderBy: { startDate: 'desc' },
     });
     return row ? this.toDomain(row) : null;
+  }
+
+  async findByIdForOrganization(
+    id: string,
+    organizationId: string,
+    tx?: TransactionClient,
+  ): Promise<FinancialPeriod | null> {
+    const client = tx ?? this.prisma;
+    // Both predicates in ONE query, not fetch-then-compare: no window in which the
+    // ownership check and the read can disagree, and "not yours" is
+    // indistinguishable from "does not exist" (#43's reasoning).
+    const row = await client.financialPeriod.findFirst({ where: { id, organizationId } });
+    return row ? this.toDomain(row) : null;
+  }
+
+  async findManyForOrganization(
+    organizationId: string,
+    status?: PeriodStatusValue,
+    tx?: TransactionClient,
+  ): Promise<FinancialPeriod[]> {
+    const client = tx ?? this.prisma;
+    const rows = await client.financialPeriod.findMany({
+      where: {
+        organizationId,
+        // Spread only when a filter was actually given — an `undefined` status
+        // key would be fine for Prisma, but being explicit keeps "no filter"
+        // visibly distinct from "filter by undefined".
+        ...(status ? { status: status as any } : {}),
+      },
+      orderBy: { startDate: 'desc' },
+    });
+    return rows.map((row) => this.toDomain(row));
   }
 
   async save(period: FinancialPeriod, tx: TransactionClient): Promise<void> {
