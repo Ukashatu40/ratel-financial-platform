@@ -1,6 +1,7 @@
 // src/contexts/payroll/domain/entities/payslip.entity.ts
 import { randomUUID } from 'crypto';
 import { Money } from '../../../../shared-kernel/money/money.vo';
+import { DomainError } from '../../../../shared-kernel/errors/domain-error';
 import { SalaryLineItem } from '../value-objects/salary-line-item';
 import { TaxComputation } from '../value-objects/tax-computation';
 
@@ -15,10 +16,21 @@ export interface PayslipProps {
   createdAt: Date;
 }
 
-export class NetPayExceedsGrossPayError extends Error {
+/**
+ * Extends DomainError, per critical convention #5. Reached over HTTP —
+ * `Payslip.generate()` is called from `AddPayslipHandler`, so as a bare Error this
+ * surfaced as a 500 whose body said only "An unexpected error occurred", discarding
+ * the "check deduction totals" hint the message exists to give. 400 rather than 422
+ * to match `InactiveOrMissingReferenceDataError`, the closest existing case of a
+ * well-formed-but-semantically-invalid request. Fixed with TECH_DEBT #50, which was
+ * the same defect in the financial-period aggregate.
+ */
+export class NetPayExceedsGrossPayError extends DomainError {
+  readonly code = 'net-pay-exceeds-gross-pay';
+  readonly httpStatus = 400;
+
   constructor(employeeId: string) {
     super(`Computed net pay exceeds gross pay for employee ${employeeId} — check deduction totals`);
-    this.name = 'NetPayExceedsGrossPayError';
   }
 }
 

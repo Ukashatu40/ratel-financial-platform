@@ -16,22 +16,24 @@ export interface FinancialPeriodProps {
   createdAt: Date;
 }
 
-export class InvalidPeriodDatesError extends Error {
+/**
+ * Both errors below extend DomainError, per critical convention #5, so
+ * ProblemDetailsFilter renders a real RFC 7807 400 naming the actual problem
+ * rather than swallowing it. A bare Error here does not merely lose the status
+ * code: the filter's fallback branch replaces the message with the fixed string
+ * "An unexpected error occurred", so the caller is told nothing about what they
+ * got wrong. `name` is not set explicitly — DomainError's constructor already
+ * assigns `this.constructor.name`.
+ */
+export class InvalidPeriodDatesError extends DomainError {
+  readonly code = 'invalid-period-dates';
+  readonly httpStatus = 400;
+
   constructor() {
     super('Financial period end_date must be after start_date');
-    this.name = 'InvalidPeriodDatesError';
   }
 }
 
-/**
- * Extends DomainError, per critical convention #5, so ProblemDetailsFilter can
- * render a real RFC 7807 400 instead of a generic 500.
- *
- * Note the asymmetry with InvalidPeriodDatesError directly above, which extends
- * bare Error and therefore does NOT get that treatment — a pre-existing
- * convention violation left untouched here because it is outside this piece's
- * scope, not because it is correct. Tracked as TECH_DEBT #50.
- */
 export class PeriodReopenReasonRequiredError extends DomainError {
   readonly code = 'period-reopen-reason-required';
   readonly httpStatus = 400;

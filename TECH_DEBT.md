@@ -1441,29 +1441,107 @@ The scoping test asserts both that the scoped lookup was called and that
 `findById` was **not**, since checking only the former would still pass if someone
 reinstated the unscoped call alongside it.
 
-### 50. `InvalidPeriodDatesError` extends bare `Error`, not `DomainError`
-**Where:** `src/contexts/financial-period/domain/aggregates/financial-period.aggregate.ts`
-**What:** pre-existing violation of critical convention #5. `FinancialPeriod.create()`
-throws it when `endDate <= startDate`, and because it isn't a `DomainError`
-subclass, `ProblemDetailsFilter` cannot render a useful RFC 7807 response — it
-degrades to a generic 500 rather than the 400 this plainly is. It now sits
-directly above `PeriodReopenReasonRequiredError`, which #48 added and which *does*
-extend `DomainError`, making the asymmetry visible in a single screenful.
+### 50. ~~`InvalidPeriodDatesError` extends bare `Error`, not `DomainError`~~ — RESOLVED
+**What it was:** a violation of critical convention #5. `FinancialPeriod.create()`
+throws `InvalidPeriodDatesError` when `endDate <= startDate`, and because it wasn't
+a `DomainError` subclass it fell through `ProblemDetailsFilter`'s final branch.
 
-**Why it wasn't fixed here:** outside #48's scope, and changing the base class of
-an error thrown on an existing endpoint changes that endpoint's status code — a
-behaviour change belonging to its own piece with its own test, not a drive-by edit
-inside a reopen feature. Left deliberately, with a comment in the aggregate saying
-so, rather than quietly "tidied".
+**The consequence was worse than the wrong status code**, which is worth recording
+because the original entry understated it. That fallback branch does not merely
+default to 500 — it replaces the message with the fixed string `'An unexpected error
+occurred'`. So `POST /financial-periods` with a reversed date range returned a 500
+that told the caller nothing at all about what was wrong with their request, even
+though the domain had produced a perfectly clear message. Verified by reading
+`problem-details.filter.ts` rather than assumed.
 
-**To close:** extend `DomainError` with `code = 'invalid-period-dates'` and
-`httpStatus = 400`, then assert the 400 in an e2e test against `POST
-/financial-periods` with a reversed date range. Worth checking for sibling cases
-at the same time — this is unlikely to be the only bare-`Error` domain throw left.
+**Fixed** by extending `DomainError` with `code = 'invalid-period-dates'` and
+`httpStatus = 400`. The explicit `this.name = ...` assignments were dropped
+throughout — `DomainError`'s constructor already sets `this.constructor.name`.
+
+**The sibling audit this item asked for was done, and it found three more.** All
+nine bare-`Error` subclasses in `src` were traced to their throw sites and call
+paths:
+
+*Fixed, because they are HTTP-reachable and were producing the same swallowed 500:*
+- `NetPayExceedsGrossPayError` (`payslip.entity.ts`) → 400 `net-pay-exceeds-gross-pay`.
+  `Payslip.generate()` is called from `AddPayslipHandler`, so this discarded the
+  "check deduction totals" hint the message exists to give.
+- `InvalidCurrencyError` (`money.vo.ts`) → 400 `unsupported-currency`. Reachable
+  through `POST /expenses`: `CreateExpenseDto` validates `@Length(3, 3)` but **not**
+  that the code is one of `NGN/USD/EUR/GBP`, so any other three-letter code reaches
+  `Money.of()`. Confirmed by reading the DTO and `currency-code.ts` together — this
+  is ordinary bad input, not a contrived case.
+
+*Correctly left bare, with the reasoning already documented in-tree at
+`domain-event-dispatcher.ts:31-39`* — these are wiring/programmer errors raised at
+module init or inside a background worker, where there is no HTTP response to render
+into: `DuplicateSubscriberNameError`, `UnknownSubscriberError`, `CsvParseError`.
+`CsvRowValidationError` and `ImportMappingError` are likewise correct: both are
+caught at `import-job.processor.ts:115` and recorded as per-row import failures, so
+they never reach the filter.
+
+*One left open as a genuine design question:* `CurrencyMismatchError` — see #51.
+
+**Coverage:** three e2e regression tests, each asserting the RFC 7807 `type` and
+`detail` rather than only the status, since a status-only assertion could pass for
+the wrong reason. A reversed date range returns 400 `invalid-period-dates` and
+persists nothing; an unsupported currency returns 400 `unsupported-currency` naming
+`XYZ`; and a positive control opens a period with a valid range (nothing else in
+that spec exercised `POST /financial-periods` at all — every other period is
+inserted through Prisma directly). Full suite green: 303 unit, 36 integration, 88
+e2e.
+
+Note the tests were **not** observed failing against the old code — that the
+`.expect(400)` would have failed is read directly off the filter's fallback branch
+returning 500, which is unambiguous, rather than demonstrated by a run.
+
+### 51. `CurrencyMismatchError` is a bare `Error`, and its correct status is a real question
+**Where:** `src/shared-kernel/money/money.vo.ts`
+**What:** the one bare-`Error` case #50's audit deliberately did not convert.
+`Money.assertSameCurrency()` throws it when arithmetic combines two `Money` values
+of different currencies, so it currently reaches `ProblemDetailsFilter`'s fallback
+and surfaces as a 500 with detail `'An unexpected error occurred'`.
+
+**Why it wasn't converted with the others:** unlike `InvalidCurrencyError`, this is
+not something a caller submitted. Reaching it means application code added NGN to
+USD — a programmer error. A 500 is arguably the *honest* answer, and relabelling it
+400 would blame the client for an internal bug. But the current 500 is also not
+deliberate: it is the accidental fallback, with a message that helps nobody, so
+"leave it alone" is not obviously right either.
+
+**To close** — pick one, deliberately:
+(a) Keep the 500 but make it intentional: a `500`-status `DomainError` subclass, so
+the filter renders the real "cannot operate on NGN and USD" message instead of
+discarding it. Diagnostics improve, status semantics stay honest. Recommended.
+(b) Leave it a bare `Error` and add a comment saying the 500 is intended — cheapest,
+but keeps the useless response body.
+(c) Make it a 400, which is only defensible if a route exists where a client can
+genuinely cause a currency mix; none was found during #50's audit.
+Whichever is chosen, the shared kernel is the wrong place for an accident — the
+point of this item is that the current behaviour is unexamined, not that it is wrong.
+
 
 ---
 
-*Last updated: 2026-08-21. Most recently: **closed #49** — `ClosePeriodHandler`
+*Last updated: 2026-08-22. Most recently: **closed #50** — three domain errors that
+extended bare `Error` now extend `DomainError`
+(`InvalidPeriodDatesError` → 400 `invalid-period-dates`,
+`NetPayExceedsGrossPayError` → 400 `net-pay-exceeds-gross-pay`,
+`InvalidCurrencyError` → 400 `unsupported-currency`). The defect was worse than the
+wrong status code: `ProblemDetailsFilter`'s fallback branch replaces the message with
+the fixed string "An unexpected error occurred", so a reversed date range or an
+unsupported currency returned a 500 that told the caller nothing. `InvalidCurrencyError`
+was reachable through ordinary input — `CreateExpenseDto` checks `@Length(3, 3)` but
+not that the code is supported. The sibling audit #50 asked for traced all nine bare
+`Error` subclasses: five are correctly bare (init-time or background-worker errors
+with no HTTP response to render into, per the existing reasoning at
+`domain-event-dispatcher.ts:31-39`, plus two caught and recorded as per-row import
+failures), and one — `CurrencyMismatchError` — was **filed as #51** rather than
+converted, because it signals a programmer error and its correct status is a real
+design question, not a mechanical fix. Covered by three e2e regression tests
+asserting `type` and `detail`, not just status.*
+
+*Earlier: 2026-08-21 — **closed #49** — `ClosePeriodHandler`
 resolved its period with the unscoped `findById` and never compared the
 `organizationId` its command had always carried, so `period:close` could close
 another organization's period. Now goes through `findByIdForOrganization`, the same
@@ -1475,12 +1553,11 @@ correct call site still needs. Covered by an e2e regression test that closes an
 **open** foreign period (open specifically — the old code would have returned 201),
 asserts 404, and checks the row is untouched on `closedAt`/`closedById` as well as
 `status`, plus a same-block positive control and the first unit spec the handler has
-ever had — its having none is why the decorative argument survived unnoticed. Also
-**filed #51**: the full e2e suite proved intermittently flaky during this
-verification — two tests in the unrelated event-delivery spec failed on a `loginAs`
-401, then passed 85/85 on an immediate re-run and 13/13 in isolation, with
-`maxWorkers: 1` ruling out parallel-worker races. Root cause not established; the
-evidence is recorded under that item rather than left as folklore.*
+ever had — its having none is why the decorative argument survived unnoticed. One
+**transient e2e failure** was observed during this verification: two tests in the
+unrelated `event-delivery-operator` spec failed on a `loginAs` 401, then passed
+85/85 on an immediate re-run and 13/13 in isolation. Root cause was not
+established, so no production change was made and no item was filed.*
 
 *Earlier the same day: **closed #48** — the financial-period
 reopen path, plus the period-discovery endpoints (`GET /financial-periods` with a

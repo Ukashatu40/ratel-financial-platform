@@ -260,6 +260,58 @@ describe('Financial period lifecycle (e2e)', () => {
     expect(entry.actorUserId).toBe(directorId);
   }, 60000);
 
+  describe('open controls', () => {
+    it('rejects a reversed date range with a 400 that names the actual problem', async () => {
+      // The #50 regression test. `OpenPeriodDto` validates only date FORMAT, so a
+      // reversed range passes the ValidationPipe and reaches
+      // FinancialPeriod.create(), where InvalidPeriodDatesError is thrown.
+      //
+      // Asserting the body, not just the status, is the whole point: as a bare
+      // Error this hit ProblemDetailsFilter's fallback branch, which returns 500
+      // with the fixed detail "An unexpected error occurred" — so the caller was
+      // told nothing about what was wrong with their request. The `type` and
+      // `detail` assertions are what would fail if the class stopped extending
+      // DomainError, since a status-only check could pass for the wrong reason.
+      const prisma = getE2eDbClient();
+      const directorToken = await loginAs('findir@e2e.test');
+
+      const res = await request(server)
+        .post('/api/v1/financial-periods')
+        .set('Authorization', `Bearer ${directorToken}`)
+        .send({ startDate: '2026-09-30', endDate: '2026-09-01' })
+        .expect(400);
+
+      expect(res.body.status).toBe(400);
+      expect(res.body.type).toContain('invalid-period-dates');
+      expect(res.body.detail).toContain('end_date must be after start_date');
+
+      // Nothing persisted — only the period the beforeEach created.
+      const periods = await prisma.financialPeriod.findMany({ where: { organizationId: orgId } });
+      expect(periods).toHaveLength(1);
+      expect(periods[0].id).toBe(periodId);
+    });
+
+    it('opens a period for a valid date range', async () => {
+      // Positive control: the 400 above must not be explained by this endpoint
+      // rejecting everything, and nothing else in this spec exercises POST at all
+      // (every other period is inserted through Prisma directly).
+      const directorToken = await loginAs('findir@e2e.test');
+
+      const res = await request(server)
+        .post('/api/v1/financial-periods')
+        .set('Authorization', `Bearer ${directorToken}`)
+        .send({ startDate: '2026-09-01', endDate: '2026-09-30' })
+        .expect(201);
+
+      expect(res.body.id).toBeDefined();
+      const created = await getE2eDbClient().financialPeriod.findUniqueOrThrow({
+        where: { id: res.body.id },
+      });
+      expect(created.organizationId).toBe(orgId);
+      expect(created.status).toBe('open');
+    });
+  });
+
   describe('close controls', () => {
     it("returns 404 for another organization's period, and leaves it open", async () => {
       // The decisive scoping control, and the regression test for #49: this period

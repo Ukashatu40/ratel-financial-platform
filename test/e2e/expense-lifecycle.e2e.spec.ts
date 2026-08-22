@@ -161,6 +161,36 @@ describe('Expense lifecycle (e2e)', () => {
       .expect(401);
   });
 
+  it('rejects an unsupported currency with a 400 that names it (TECH_DEBT #50)', async () => {
+    // `CreateExpenseDto` validates `@Length(3, 3)` but not that the code is one
+    // Money supports (NGN/USD/EUR/GBP), so 'XYZ' passes the ValidationPipe and
+    // reaches `Money.of()`, which throws InvalidCurrencyError.
+    //
+    // Until #50 that was a bare Error, so ProblemDetailsFilter's fallback returned
+    // 500 with the fixed detail "An unexpected error occurred" — the caller was not
+    // told their currency was the problem. Asserting `type` and `detail`, not just
+    // the status, is what makes this a regression test rather than a status check
+    // that could pass for the wrong reason.
+    const employeeToken = await loginAs('employee@e2e.test');
+
+    const res = await request(server)
+      .post('/api/v1/expenses')
+      .set('Authorization', `Bearer ${employeeToken}`)
+      .send({
+        sourceType: 'employee',
+        amountMinorUnits: 150000,
+        currency: 'XYZ',
+        categoryId,
+        departmentId: deptId,
+        expenseDate: '2026-08-02',
+      })
+      .expect(400);
+
+    expect(res.body.status).toBe(400);
+    expect(res.body.type).toContain('unsupported-currency');
+    expect(res.body.detail).toContain('XYZ');
+  });
+
   it('rejects login with the wrong password using a generic message (no user enumeration)', async () => {
     const res = await request(server)
       .post('/api/v1/auth/login')
