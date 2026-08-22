@@ -859,48 +859,6 @@ warnings, cold (17s) and warm (7s).
 
 ---
 
-### 51. Full e2e suite is intermittently flaky — a `loginAs` in one spec got a 401
-**Where:** observed in `test/e2e/event-delivery-operator.e2e.spec.ts`, in the
-`loginAs()` helper (`expect(201)` on `POST /api/v1/auth/login` returned 401), on two
-tests in the same run.
-**What:** running the **whole** e2e suite, two tests in that spec failed because
-login was rejected — meaning the user row that spec's own `beforeEach` had just
-created was not there, or not usable, by the time login ran. Observed once, on
-2026-08-21, while verifying #49.
-
-**Evidence it is cross-suite interference and not a defect in that spec:**
-- The spec passes **13/13 in isolation**.
-- An immediate re-run of the full suite passed **85/85 across all 8 specs**, with no
-  code change in between.
-- `jest.e2e.config.js` sets `maxWorkers: 1`, so this is *not* two specs racing in
-  parallel workers — it is sequential specs interfering through shared state.
-- The failing run logged `[AttachmentScanProcessor] INFECTED FILE DETECTED` **after
-  Jest had already printed the run summary**, i.e. background work outliving the
-  spec that started it. That is the same family as #38, which fixed one instance of
-  it (attachment scan jobs) by draining before cleanup.
-
-**Root cause is NOT established** — the above is consistent with an app from an
-earlier spec still running background workers (the outbox dispatch poller runs every
-3s) while the next spec's `cleanE2eDatabase()` truncates every table and re-seeds,
-but the exact interleaving that produces a 401 was not pinned down, and it did not
-reproduce on the next run. Recorded now, with the evidence, rather than left as
-folklore about "the e2e suite being flaky sometimes".
-
-**Not caused by #49.** That change is confined to the financial-period context
-(`ClosePeriodHandler`'s lookup, plus tests) and touches nothing in auth or event
-delivery. Stated as reasoning plus the isolation/re-run evidence above, not as a
-separately bisected result — the flake's non-determinism means a single green
-baseline run would not have proved it either way.
-
-**To close:** make each e2e spec's teardown deterministic rather than relying on
-`app.close()` alone — drain or pause the outbox poller and any BullMQ workers before
-`cleanE2eDatabase()`, extending #38's settle-polling approach from attachment scans
-to the pipeline generally. Until then, treat a lone e2e failure in an unrelated spec
-as suspect and re-run before believing it, which is itself a real cost: it erodes
-the signal the e2e suite exists to provide.
-
----
-
 ## Observability
 
 ### 29. Prisma health-check error message is occasionally empty in a narrow reconnection race
