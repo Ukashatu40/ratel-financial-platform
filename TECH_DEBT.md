@@ -1495,51 +1495,50 @@ Note the tests were **not** observed failing against the old code — that the
 `.expect(400)` would have failed is read directly off the filter's fallback branch
 returning 500, which is unambiguous, rather than demonstrated by a run.
 
-### 51. `CurrencyMismatchError` is a bare `Error`, and its correct status is a real question
-**Where:** `src/shared-kernel/money/money.vo.ts`
-**What:** the one bare-`Error` case #50's audit deliberately did not convert.
-`Money.assertSameCurrency()` throws it when arithmetic combines two `Money` values
-of different currencies, so it currently reaches `ProblemDetailsFilter`'s fallback
-and surfaces as a 500 with detail `'An unexpected error occurred'`.
+### 51. ~~`CurrencyMismatchError` is a bare `Error`, and its correct status is a real question~~ — RESOLVED
+Took option (a) from this item's own analysis: `CurrencyMismatchError` now
+extends `DomainError` with `httpStatus: 500` — the status stays honest
+(this is a programmer error: application code added two different
+currencies together, not something a client caused), but
+`ProblemDetailsFilter` now renders the real message instead of discarding
+it into the generic `'An unexpected error occurred'` fallback.
 
-**Why it wasn't converted with the others:** unlike `InvalidCurrencyError`, this is
-not something a caller submitted. Reaching it means application code added NGN to
-USD — a programmer error. A 500 is arguably the *honest* answer, and relabelling it
-400 would blame the client for an internal bug. But the current 500 is also not
-deliberate: it is the accidental fallback, with a message that helps nobody, so
-"leave it alone" is not obviously right either.
+**No e2e test was added, deliberately, not by oversight.** Every call site
+of `Money.add()` in the codebase was traced: `PayrollRun.totalGrossPay()`
+is the only real caller, and `AddPayslipHandler` hardcodes a single
+currency for every payslip in a run, so there is currently no path through
+the API that constructs two different-currency `Money` values and adds
+them. With multi-currency support itself not yet started, fabricating an
+HTTP path just to claim e2e coverage would misrepresent what the system
+can actually do today. Covered instead by 3 unit tests asserting the
+`DomainError` shape (`instanceof` check, `code`/`httpStatus`/`message`
+values, and the same-currency non-throwing case) — the correct and honest
+level of coverage for a currently-unreachable defensive invariant.
 
-**To close** — pick one, deliberately:
-(a) Keep the 500 but make it intentional: a `500`-status `DomainError` subclass, so
-the filter renders the real "cannot operate on NGN and USD" message instead of
-discarding it. Diagnostics improve, status semantics stay honest. Recommended.
-(b) Leave it a bare `Error` and add a comment saying the 500 is intended — cheapest,
-but keeps the useless response body.
-(c) Make it a 400, which is only defensible if a route exists where a client can
-genuinely cause a currency mix; none was found during #50's audit.
-Whichever is chosen, the shared kernel is the wrong place for an accident — the
-point of this item is that the current behaviour is unexamined, not that it is wrong.
+**Closes the audit #50 opened.** All nine bare-`Error` subclasses found in
+`src` have now been resolved: five converted to `DomainError`
+(`InvalidPeriodDatesError`, `NetPayExceedsGrossPayError`,
+`InvalidCurrencyError` under #50; `CurrencyMismatchError` here), and four
+correctly left bare with their reasoning already documented in-tree
+(`DuplicateSubscriberNameError`, `UnknownSubscriberError`, `CsvParseError`,
+plus `CsvRowValidationError`/`ImportMappingError`, which are caught and
+recorded as per-row import failures before ever reaching an HTTP response).
 
 
 ---
 
-*Last updated: 2026-08-22. Most recently: **closed #50** — three domain errors that
-extended bare `Error` now extend `DomainError`
-(`InvalidPeriodDatesError` → 400 `invalid-period-dates`,
-`NetPayExceedsGrossPayError` → 400 `net-pay-exceeds-gross-pay`,
-`InvalidCurrencyError` → 400 `unsupported-currency`). The defect was worse than the
-wrong status code: `ProblemDetailsFilter`'s fallback branch replaces the message with
-the fixed string "An unexpected error occurred", so a reversed date range or an
-unsupported currency returned a 500 that told the caller nothing. `InvalidCurrencyError`
-was reachable through ordinary input — `CreateExpenseDto` checks `@Length(3, 3)` but
-not that the code is supported. The sibling audit #50 asked for traced all nine bare
-`Error` subclasses: five are correctly bare (init-time or background-worker errors
-with no HTTP response to render into, per the existing reasoning at
-`domain-event-dispatcher.ts:31-39`, plus two caught and recorded as per-row import
-failures), and one — `CurrencyMismatchError` — was **filed as #51** rather than
-converted, because it signals a programmer error and its correct status is a real
-design question, not a mechanical fix. Covered by three e2e regression tests
-asserting `type` and `detail`, not just status.*
+*Last updated: 2026-08-22. Most recently: **closed #51** —
+`CurrencyMismatchError` now extends `DomainError` (500,
+`currency-mismatch`), taking the option #50's audit recommended: keep the
+status honest (a programmer error, not client-caused) but stop discarding
+the real message into the generic fallback text. No e2e test was added —
+traced every `Money.add()` call site and found none reachable through the
+API today, since `AddPayslipHandler` hardcodes a single currency per run
+and multi-currency support hasn't started; fabricating a path would have
+misrepresented coverage, so this is unit-tested only, honestly. This
+closes out the full audit #50 opened: all nine bare-`Error` subclasses in
+`src` are now accounted for — five converted, four correctly left bare
+with their reasoning already in-tree.*
 
 *Earlier: 2026-08-21 — **closed #49** — `ClosePeriodHandler`
 resolved its period with the unscoped `findById` and never compared the
