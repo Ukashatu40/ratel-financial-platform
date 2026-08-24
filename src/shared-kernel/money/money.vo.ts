@@ -110,9 +110,11 @@ export class InvalidCurrencyError extends DomainError {
  * for an internal bug. Left as a deliberate open question rather than silently
  * decided.
  */
-export class CurrencyMismatchError extends Error {
+export class CurrencyMismatchError extends DomainError {
+  readonly code = 'currency-mismatch';
+  readonly httpStatus = 500;
+
   constructor(a: CurrencyCode, b: CurrencyCode) {
     super(`Currency mismatch: cannot operate on ${a} and ${b} directly`);
-    this.name = 'CurrencyMismatchError';
   }
 }
