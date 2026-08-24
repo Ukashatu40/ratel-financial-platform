@@ -4,6 +4,7 @@ import {
   InvalidCurrencyError,
   Money,
 } from '../../../src/shared-kernel/money/money.vo';
+import { DomainError } from '../../../src/shared-kernel/errors/domain-error';
 import { describe, expect, it } from '@jest/globals';
 
 describe('Money', () => {
@@ -95,6 +96,44 @@ describe('Money', () => {
       const original = Money.of(-500000n, 'NGN');
       const restored = Money.fromJSON(original.toJSON());
       expect(restored.equals(original)).toBe(true);
+    });
+  });
+
+  describe('CurrencyMismatchError (#51)', () => {
+    it('throws a DomainError, not a bare Error, when adding mismatched currencies', () => {
+      const ngn = Money.of(1000n, 'NGN');
+      const usd = Money.of(1000n, 'USD');
+
+      let caught: unknown;
+      try {
+        ngn.add(usd);
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(caught).toBeInstanceOf(DomainError);
+      expect(caught).toBeInstanceOf(CurrencyMismatchError);
+    });
+
+    it('carries the correct code and status for ProblemDetailsFilter to render', () => {
+      const ngn = Money.of(1000n, 'NGN');
+      const usd = Money.of(1000n, 'USD');
+
+      try {
+        ngn.add(usd);
+        fail('expected CurrencyMismatchError to be thrown');
+      } catch (err) {
+        const domainErr = err as CurrencyMismatchError;
+        expect(domainErr.code).toBe('currency-mismatch');
+        expect(domainErr.httpStatus).toBe(500);
+        expect(domainErr.message).toBe('Currency mismatch: cannot operate on NGN and USD directly');
+      }
+    });
+
+    it('does NOT throw when currencies match', () => {
+      const a = Money.of(1000n, 'NGN');
+      const b = Money.of(500n, 'NGN');
+      expect(() => a.add(b)).not.toThrow();
     });
   });
 });
