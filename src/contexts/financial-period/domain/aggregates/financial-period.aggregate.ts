@@ -75,7 +75,13 @@ export class FinancialPeriod extends AggregateRoot {
   }
 
   static reconstitute(props: FinancialPeriodProps): FinancialPeriod {
-    return new FinancialPeriod(props);
+    const period = new FinancialPeriod(props);
+    period.captureBaseline();
+    return period;
+  }
+
+  protected snapshotState(): Record<string, unknown> {
+    return this.toProps();
   }
 
   // --- Behavior ---
