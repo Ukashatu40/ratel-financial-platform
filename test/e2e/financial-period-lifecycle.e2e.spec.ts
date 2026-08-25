@@ -101,6 +101,16 @@ describe('Financial period lifecycle (e2e)', () => {
       },
     });
 
+    // The audit-trail reader (#8). A distinct role from finance_director on purpose:
+    // it holds audit:view and NOT period:open, so the 403 control below cannot be
+    // satisfied by an account that happens to hold everything.
+    const auditor = await prisma.user.create({
+      data: { email: 'auditor@e2e.test', passwordHash },
+    });
+    await prisma.userRoleAssignment.create({
+      data: { userId: auditor.id, organizationId: orgId, role: 'auditor', departmentId: null },
+    });
+
     await prisma.rolePermission.createMany({
       data: [
         { role: 'employee', permission: 'expense:create', scope: 'own' },
@@ -109,6 +119,9 @@ describe('Financial period lifecycle (e2e)', () => {
         // no re-seed is required for this capability.
         { role: 'finance_director', permission: 'period:open', scope: 'organization' },
         { role: 'finance_director', permission: 'period:close', scope: 'organization' },
+        // audit:view was already seeded for `auditor` in the real seed data but
+        // guarded no endpoint until GET /audit-entries existed (#8).
+        { role: 'auditor', permission: 'audit:view', scope: 'organization' },
       ],
     });
   });
@@ -438,6 +451,247 @@ describe('Financial period lifecycle (e2e)', () => {
       });
       expect(stillClosed.status).toBe('closed');
     });
+  });
+
+  describe('audit trail (TECH_DEBT #8)', () => {
+    it('records the before-image in old_value when a period is closed', async () => {
+      // THE end-to-end proof #8 is closed. `old_value` has existed as a column since
+      // the first audit migration and was NEVER written to — permanently NULL. The
+      // diff is computed generically in AggregateRoot, lifted into the column by
+      // AuditSubscriber, and this asserts it survives the whole real path: HTTP ->
+      // aggregate -> outbox -> BullMQ poller -> AuditSubscriber -> Postgres.
+      const prisma = getE2eDbClient();
+      const directorToken = await loginAs('findir@e2e.test');
+
+      await request(server)
+        .post(`/api/v1/financial-periods/${periodId}/close`)
+        .set('Authorization', `Bearer ${directorToken}`)
+        .expect(201);
+
+      const audited = await waitFor(async () => {
+        const entry = await prisma.auditLogEntry.findFirst({
+          where: { entityId: periodId, action: 'PeriodClosed' },
+        });
+        return entry !== null;
+      });
+      expect(audited).toBe(true);
+
+      const entry = await prisma.auditLogEntry.findFirstOrThrow({
+        where: { entityId: periodId, action: 'PeriodClosed' },
+      });
+
+      // The before-state: what the period looked like prior to the close.
+      expect(entry.oldValue).toMatchObject({ status: 'open', closedById: null });
+      // And the after-state, as a from/to pair on the payload.
+      expect(entry.newValue).toMatchObject({
+        changes: { status: { from: 'open', to: 'closed' } },
+      });
+      // Written under the scheme that actually covers the payload.
+      expect(entry.hashVersion).toBe(2);
+    }, 60000);
+
+    it('leaves old_value NULL for a creation event, which has no before-state', async () => {
+      // The deliberate asymmetry: a period that was just opened did not exist before,
+      // so a diff would be a fabrication. NULL is the honest record.
+      const prisma = getE2eDbClient();
+      const directorToken = await loginAs('findir@e2e.test');
+
+      const created = await request(server)
+        .post('/api/v1/financial-periods')
+        .set('Authorization', `Bearer ${directorToken}`)
+        .send({ startDate: '2026-10-01', endDate: '2026-10-31' })
+        .expect(201);
+
+      const audited = await waitFor(async () => {
+        const entry = await prisma.auditLogEntry.findFirst({
+          where: { entityId: created.body.id, action: 'PeriodOpened' },
+        });
+        return entry !== null;
+      });
+      expect(audited).toBe(true);
+
+      const entry = await prisma.auditLogEntry.findFirstOrThrow({
+        where: { entityId: created.body.id, action: 'PeriodOpened' },
+      });
+      expect(entry.oldValue).toBeNull();
+      expect(entry.newValue).not.toHaveProperty('changes');
+    }, 60000);
+
+    it('exposes entries through GET /audit-entries for a role holding audit:view', async () => {
+      const directorToken = await loginAs('findir@e2e.test');
+      const auditorToken = await loginAs('auditor@e2e.test');
+
+      await request(server)
+        .post(`/api/v1/financial-periods/${periodId}/close`)
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .expect(403); // control: auditor cannot close, only read
+
+      await request(server)
+        .post(`/api/v1/financial-periods/${periodId}/close`)
+        .set('Authorization', `Bearer ${directorToken}`)
+        .expect(201);
+
+      const prisma = getE2eDbClient();
+      await waitFor(async () => {
+        const entry = await prisma.auditLogEntry.findFirst({
+          where: { entityId: periodId, action: 'PeriodClosed' },
+        });
+        return entry !== null;
+      });
+
+      const res = await request(server)
+        .get(`/api/v1/audit-entries?entityId=${periodId}&action=PeriodClosed`)
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .expect(200);
+
+      expect(res.body).toHaveLength(1);
+      expect(res.body[0]).toMatchObject({
+        entityType: 'FinancialPeriod',
+        entityId: periodId,
+        action: 'PeriodClosed',
+        hashVersion: 2,
+      });
+      expect(res.body[0].oldValue).toMatchObject({ status: 'open' });
+
+      // Exact key set, so widening the response has to be deliberate (#21's
+      // reasoning) — and organizationId must NOT be echoed back to a caller that
+      // already knows it (#22/#47).
+      expect(Object.keys(res.body[0]).sort()).toEqual(
+        [
+          'action',
+          'actorUserId',
+          'correlationId',
+          'createdAt',
+          'entityId',
+          'entityType',
+          'entryHash',
+          'hashVersion',
+          'id',
+          'newValue',
+          'oldValue',
+          'prevHash',
+          'reason',
+        ].sort(),
+      );
+      expect(res.body[0]).not.toHaveProperty('organizationId');
+    }, 60000);
+
+    it('denies GET /audit-entries to a role without audit:view', async () => {
+      // Without this control, the 200 above could be explained by the guard never
+      // running at all. finance_director deliberately does NOT hold audit:view.
+      const directorToken = await loginAs('findir@e2e.test');
+
+      await request(server)
+        .get('/api/v1/audit-entries')
+        .set('Authorization', `Bearer ${directorToken}`)
+        .expect(403);
+    });
+
+    it("never returns another organization's audit entries", async () => {
+      const prisma = getE2eDbClient();
+      // Inserted directly: this org has no users, so it cannot be driven over HTTP.
+      await prisma.auditLogEntry.create({
+        data: {
+          organizationId: otherOrgId,
+          entityType: 'FinancialPeriod',
+          entityId: 'foreign-period',
+          action: 'PeriodClosed',
+          actorUserId: null,
+          newValue: { organizationId: otherOrgId },
+          correlationId: 'foreign-corr',
+          source: 'api',
+          prevHash: '0'.repeat(64),
+          entryHash: 'f'.repeat(64),
+        },
+      });
+      const auditorToken = await loginAs('auditor@e2e.test');
+
+      const res = await request(server)
+        .get('/api/v1/audit-entries')
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .expect(200);
+
+      expect(res.body.every((e: { entityId: string }) => e.entityId !== 'foreign-period')).toBe(
+        true,
+      );
+    });
+
+    it('rejects an unknown query parameter and a malformed date with 400', async () => {
+      const auditorToken = await loginAs('auditor@e2e.test');
+
+      // forbidNonWhitelisted: a typo'd filter fails loudly instead of being ignored
+      // and silently returning a wider result set than the caller asked for.
+      await request(server)
+        .get('/api/v1/audit-entries?entityID=whoops')
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .expect(400);
+
+      await request(server)
+        .get('/api/v1/audit-entries?from=not-a-date')
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .expect(400);
+
+      // Over the 500 cap — an audit trail is unbounded, so an uncapped limit would
+      // let one request try to serialize the entire history.
+      await request(server)
+        .get('/api/v1/audit-entries?limit=5000')
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .expect(400);
+    });
+  });
+
+  describe('period notifications (TECH_DEBT #32)', () => {
+    it('notifies period-permission holders when a period is closed and reopened', async () => {
+      // Recipients are resolved from role_permissions rather than a hardcoded role
+      // list, so this also proves that indirection works end to end: finance_director
+      // holds period:open/period:close in this fixture, so the director is a
+      // recipient without the subscriber naming that role anywhere.
+      const prisma = getE2eDbClient();
+      const directorToken = await loginAs('findir@e2e.test');
+      const REASON = 'Reopened to correct a misposted vendor invoice';
+
+      await request(server)
+        .post(`/api/v1/financial-periods/${periodId}/close`)
+        .set('Authorization', `Bearer ${directorToken}`)
+        .expect(201);
+
+      const closedNotified = await waitFor(async () => {
+        const log = await prisma.notificationLog.findFirst({
+          where: { templateType: 'PeriodClosed', recipientUserId: directorId },
+        });
+        return log !== null;
+      });
+      expect(closedNotified).toBe(true);
+
+      await request(server)
+        .post(`/api/v1/financial-periods/${periodId}/reopen`)
+        .set('Authorization', `Bearer ${directorToken}`)
+        .send({ reason: REASON })
+        .expect(201);
+
+      const reopenedNotified = await waitFor(async () => {
+        const log = await prisma.notificationLog.findFirst({
+          where: { templateType: 'PeriodReopened', recipientUserId: directorId },
+        });
+        return log !== null;
+      });
+      expect(reopenedNotified).toBe(true);
+
+      // The reason #48 made mandatory must reach the template data — it is the whole
+      // point of notifying anyone about a reopen.
+      const log = await prisma.notificationLog.findFirstOrThrow({
+        where: { templateType: 'PeriodReopened', recipientUserId: directorId },
+      });
+      expect(log.templateData).toMatchObject({ reason: REASON });
+      // The auditor holds audit:view but NOT period:open/close, so must NOT be
+      // notified — the control proving recipient resolution filters rather than
+      // notifying every user in the organization.
+      const auditorLogs = await prisma.notificationLog.findMany({
+        where: { templateType: { in: ['PeriodClosed', 'PeriodReopened'] } },
+        select: { recipientUserId: true },
+      });
+      expect(auditorLogs.every((l) => l.recipientUserId === directorId)).toBe(true);
+    }, 60000);
   });
 
   describe('period discovery', () => {
