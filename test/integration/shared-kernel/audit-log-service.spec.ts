@@ -6,7 +6,11 @@ import { PrismaService } from '../../../src/prisma/prisma.service';
 import { UNIT_OF_WORK } from '../../../src/shared-kernel/unit-of-work/unit-of-work.port';
 import { PrismaUnitOfWork } from '../../../src/shared-kernel/unit-of-work/prisma-unit-of-work';
 import { AuditLogService } from '../../../src/shared-kernel/audit/audit-log.service';
-import { GENESIS_HASH } from '../../../src/shared-kernel/audit/hash-chain.util';
+import {
+  CURRENT_HASH_VERSION,
+  GENESIS_HASH,
+  computeEntryHashV2,
+} from '../../../src/shared-kernel/audit/hash-chain.util';
 import { expect, it, describe, beforeAll, beforeEach, afterAll } from '@jest/globals';
 
 describe('AuditLogService (integration) — hash-chain atomicity under concurrency', () => {
@@ -132,5 +136,123 @@ describe('AuditLogService (integration) — hash-chain atomicity under concurren
     const orgBHashes = new Set(orgBEntries.map((e) => e.entryHash));
     const overlap = [...orgAHashes].filter((h) => orgBHashes.has(h));
     expect(overlap).toHaveLength(0);
+  });
+
+  // --- TECH_DEBT #8 / hash v2 ---
+
+  it('new rows are hashVersion 2, and oldValue/newValue are persisted (and no longer NULL)', async () => {
+    await service.record({
+      organizationId: 'org-1',
+      entityType: 'FinancialPeriod',
+      entityId: 'period-1',
+      action: 'PeriodClosed',
+      actorUserId: 'user-1',
+      oldValue: { status: 'open', closedById: null },
+      newValue: { organizationId: 'org-1', status: 'closed', closedById: 'user-1' },
+      correlationId: 'corr-hashv2',
+      source: 'api',
+    });
+
+    const row = await prisma.auditLogEntry.findFirstOrThrow({
+      where: { correlationId: 'corr-hashv2' },
+    });
+
+    expect(row.hashVersion).toBe(CURRENT_HASH_VERSION);
+    expect(row.oldValue).toMatchObject({ status: 'open' });
+    expect(row.newValue).toMatchObject({ status: 'closed' });
+  });
+
+  it('recomputing the v2 hash from the row read back out of Postgres reproduces entryHash — the jsonb key-order proof', async () => {
+    // THE load-bearing test for the canonical serialization in hash v2.
+    //
+    // old_value/new_value are jsonb. Postgres does not preserve key insertion order:
+    // it stores a parsed representation and returns keys in the database's own order.
+    // So JSON.stringify(row.newValue) will generally NOT equal
+    // JSON.stringify(originalObject), even though they are the same data. If v2 had
+    // hashed with plain JSON.stringify, this assertion would fail — and would keep
+    // failing for every row ever written, because a verifier recomputing the hash
+    // from the DB would get a different string.
+    //
+    // A unit test on an in-memory object CANNOT catch this: the object never goes
+    // through jsonb, so key order is whatever the test wrote. This is the only layer
+    // that can prove it, which is why it lives here rather than as a mock.
+    const newValue = {
+      organizationId: 'org-1',
+      // Several keys that may be reordered by jsonb, including a nested object.
+      status: 'closed',
+      closedById: 'user-1',
+      reason: 'Late vendor invoice',
+      changes: {
+        status: { from: 'open', to: 'closed' },
+        closedById: { from: null, to: 'user-1' },
+      },
+    };
+    const oldValue = { status: 'open', closedById: null };
+
+    await service.record({
+      organizationId: 'org-1',
+      entityType: 'FinancialPeriod',
+      entityId: 'period-1',
+      action: 'PeriodClosed',
+      actorUserId: 'user-1',
+      oldValue,
+      newValue,
+      reason: 'Late vendor invoice',
+      correlationId: 'corr-roundtrip',
+      source: 'api',
+    });
+
+    const row = await prisma.auditLogEntry.findFirstOrThrow({
+      where: { correlationId: 'corr-roundtrip' },
+    });
+
+    // Recomputed entirely from what the database returned — NOT from the local
+    // objects above. If this equals the stored hash, the serialization in the hash
+    // function and the serialization jsonb applies are compatible.
+    const recomputed = computeEntryHashV2(row.prevHash, {
+      organizationId: row.organizationId,
+      entityType: row.entityType,
+      entityId: row.entityId,
+      action: row.action,
+      actorUserId: row.actorUserId,
+      correlationId: row.correlationId,
+      createdAt: row.createdAt,
+      oldValue: row.oldValue,
+      newValue: row.newValue,
+      reason: row.reason ?? undefined,
+    });
+
+    expect(recomputed).toBe(row.entryHash);
+  });
+
+  it('the chain stays v2-consistent under concurrent writers', async () => {
+    // 20 concurrent v2 writes: the chain must still be unbroken (the advisory lock
+    // serializes prevHash reads regardless of hash scheme), and every new row must
+    // be hashVersion 2 so a future verifier picks the right function for each row.
+    await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        service.record({
+          organizationId: 'org-1',
+          entityType: 'Expense',
+          entityId: `exp-v2-${i}`,
+          action: 'ExpenseDrafted',
+          actorUserId: 'user-1',
+          newValue: { index: i },
+          correlationId: `corr-v2-${i}`,
+          source: 'api',
+        }),
+      ),
+    );
+
+    const entries = await prisma.auditLogEntry.findMany({
+      where: { organizationId: 'org-1' },
+      orderBy: { createdAt: 'asc' },
+    });
+    expect(entries).toHaveLength(20);
+    expect(entries[0].prevHash).toBe(GENESIS_HASH);
+    for (let i = 1; i < entries.length; i++) {
+      expect(entries[i].prevHash).toBe(entries[i - 1].entryHash);
+    }
+    expect(entries.every((e) => e.hashVersion === CURRENT_HASH_VERSION)).toBe(true);
   });
 });

@@ -18,6 +18,37 @@ function extractActorId(payload: Record<string, unknown>): string | null {
 }
 
 /**
+ * Before-image of whatever fields the action changed, for the `old_value` column
+ * (TECH_DEBT #8).
+ *
+ * `AggregateRoot` computes the diff generically and puts it on the payload as
+ * `changes: { field: { from, to } }`. This lifts the `from` side out, which is
+ * exactly what `old_value` means. Returns undefined — stored as NULL — when the
+ * event carries no `changes` at all: creation events, and events whose aggregate
+ * mutated something other than its own props (`PayrollRun.addPayslip`). NULL is the
+ * honest record there; `{}` would imply a diff was computed and found nothing.
+ *
+ * The `to` side is deliberately NOT stripped from `newValue`, which continues to
+ * store the whole payload. Slightly redundant, but each column stays independently
+ * meaningful and existing consumers of `newValue` keep working unchanged.
+ */
+function extractOldValue(payload: Record<string, unknown>): Record<string, unknown> | undefined {
+  const changes = payload['changes'];
+  if (changes === null || typeof changes !== 'object' || Array.isArray(changes)) return undefined;
+
+  const oldValue: Record<string, unknown> = {};
+  for (const [field, change] of Object.entries(changes as Record<string, unknown>)) {
+    // Defensive about the shape rather than trusting it: this payload has been
+    // through jsonb and back by the time a redelivery replays it.
+    if (change !== null && typeof change === 'object' && 'from' in change) {
+      oldValue[field] = (change as { from: unknown }).from;
+    }
+  }
+
+  return Object.keys(oldValue).length > 0 ? oldValue : undefined;
+}
+
+/**
  * The Conformist subscriber from Phase 3.5 — registers globally (every
  * event type, no exceptions) via DomainEventDispatcher.registerGlobal().
  * Deliberately asks NOTHING of upstream contexts: it doesn't require them
@@ -60,6 +91,7 @@ export class AuditSubscriber implements OnModuleInit {
       entityId: event.aggregateId,
       action: event.type,
       actorUserId: extractActorId(event.payload),
+      oldValue: extractOldValue(event.payload),
       newValue: event.payload,
       reason: (event.payload['reason'] as string) ?? undefined,
       correlationId: event.correlationId ?? 'unknown',

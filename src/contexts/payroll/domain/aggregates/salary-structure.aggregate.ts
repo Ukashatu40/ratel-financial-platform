@@ -65,7 +65,13 @@ export class SalaryStructure extends AggregateRoot {
   }
 
   static reconstitute(props: SalaryStructureProps): SalaryStructure {
-    return new SalaryStructure(props);
+    const structure = new SalaryStructure(props);
+    structure.captureBaseline();
+    return structure;
+  }
+
+  protected snapshotState(): Record<string, unknown> {
+    return this.toProps();
   }
 
   toSnapshot(): Record<string, unknown> {

@@ -1,7 +1,7 @@
 // src/shared-kernel/audit/audit-log.service.ts
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { UNIT_OF_WORK, UnitOfWork } from '../unit-of-work/unit-of-work.port';
-import { computeEntryHash, GENESIS_HASH } from './hash-chain.util';
+import { computeEntryHashV2, CURRENT_HASH_VERSION, GENESIS_HASH } from './hash-chain.util';
 
 export interface RecordAuditEntryInput {
   organizationId: string;
@@ -9,6 +9,13 @@ export interface RecordAuditEntryInput {
   entityId: string;
   action: string;
   actorUserId: string | null;
+  /**
+   * Before-image of the fields this action changed (TECH_DEBT #8). Undefined for
+   * creation events and for events whose aggregate reported no field changes —
+   * stored as NULL, which reads honestly as "there was no before-state" rather than
+   * as an empty diff.
+   */
+  oldValue?: unknown;
   newValue: unknown;
   reason?: string;
   correlationId: string;
@@ -46,7 +53,7 @@ export class AuditLogService {
       const prevHash = last?.entryHash ?? GENESIS_HASH;
       const createdAt = new Date();
 
-      const entryHash = computeEntryHash(prevHash, {
+      const entryHash = computeEntryHashV2(prevHash, {
         organizationId: input.organizationId,
         entityType: input.entityType,
         entityId: input.entityId,
@@ -54,6 +61,11 @@ export class AuditLogService {
         actorUserId: input.actorUserId,
         correlationId: input.correlationId,
         createdAt,
+        // v2 covers the payload too, so the diff in old_value cannot be rewritten
+        // without breaking the chain.
+        oldValue: input.oldValue,
+        newValue: input.newValue,
+        reason: input.reason,
       });
 
       await tx.auditLogEntry.create({
@@ -63,6 +75,7 @@ export class AuditLogService {
           entityId: input.entityId,
           action: input.action,
           actorUserId: input.actorUserId,
+          oldValue: (input.oldValue ?? null) as any,
           newValue: input.newValue as any,
           reason: input.reason,
           correlationId: input.correlationId,
@@ -72,6 +85,7 @@ export class AuditLogService {
           source: input.source,
           prevHash,
           entryHash,
+          hashVersion: CURRENT_HASH_VERSION,
           createdAt,
         },
       });

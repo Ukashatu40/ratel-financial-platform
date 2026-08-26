@@ -32,9 +32,9 @@ export class NotificationSubscriber implements OnModuleInit {
   ) {}
 
   onModuleInit(): void {
-    // Same subscriber name across all three types: it is one subscriber that
-    // happens to care about three events, and redelivery resolves the handler
-    // per event type, so there is no ambiguity.
+    // Same subscriber name across all types: it is one subscriber that happens to
+    // care about several events, and redelivery resolves the handler per event type,
+    // so there is no ambiguity.
     this.dispatcher.register(
       'ExpenseApproved',
       (e) => this.handleExpenseApproved(e),
@@ -48,6 +48,22 @@ export class NotificationSubscriber implements OnModuleInit {
     this.dispatcher.register(
       'PayrollRunApproved',
       (e) => this.handlePayrollRunApproved(e),
+      'NotificationSubscriber',
+    );
+    // --- Added closing TECH_DEBT #32 ---
+    this.dispatcher.register(
+      'PayrollRunRejected',
+      (e) => this.handlePayrollRunRejected(e),
+      'NotificationSubscriber',
+    );
+    this.dispatcher.register(
+      'PeriodClosed',
+      (e) => this.handlePeriodStatusChange(e, 'PeriodClosed'),
+      'NotificationSubscriber',
+    );
+    this.dispatcher.register(
+      'PeriodReopened',
+      (e) => this.handlePeriodStatusChange(e, 'PeriodReopened'),
       'NotificationSubscriber',
     );
   }
@@ -121,6 +137,97 @@ export class NotificationSubscriber implements OnModuleInit {
       });
     }
   }
+  /**
+   * Mirrors handleExpenseRejected: the person who needs to know is whoever created
+   * the thing that got rejected, not the approver who rejected it. Before this, a
+   * payroll admin whose run was sent back learned about it only by going and looking
+   * — the asymmetry with ExpenseRejected recorded under #32.
+   *
+   * Note the run is back in `draft` by the time this fires, not a terminal `rejected`
+   * state — a deliberate design choice recorded as #11 — so "review and resubmit" is
+   * genuinely actionable advice rather than a dead end.
+   */
+  private async handlePayrollRunRejected(event: DomainEvent): Promise<void> {
+    const run = await this.prisma.payrollRun.findFirst({ where: { id: event.aggregateId } });
+    if (!run) return;
+
+    await this.enqueue({
+      recipientUserId: run.createdById,
+      templateType: 'PayrollRunRejected',
+      templateData: {
+        runMonth: run.runMonth.toISOString().slice(0, 7),
+        reason: (event.payload['reason'] as string) ?? 'No reason provided',
+      },
+    });
+  }
+
+  /**
+   * PeriodClosed / PeriodReopened. One handler for both because recipient resolution
+   * is identical and only the template and its data differ — two near-duplicate
+   * methods would be the kind of drift-prone copy this codebase avoids elsewhere.
+   *
+   * Recipients are resolved from the PERMISSION table rather than a hardcoded role
+   * list, for the reason critical convention #2 exists: `role_permissions` is the
+   * single source of truth for who holds what, so granting `period:close` to a new
+   * role automatically starts notifying it with no change here. A hardcoded
+   * ['finance_director'] would silently drift the moment that grant changed.
+   */
+  private async handlePeriodStatusChange(
+    event: DomainEvent,
+    templateType: Extract<NotificationTemplateType, 'PeriodClosed' | 'PeriodReopened'>,
+  ): Promise<void> {
+    const period = await this.prisma.financialPeriod.findFirst({
+      where: { id: event.aggregateId },
+    });
+    if (!period) return;
+
+    const organizationId = (event.payload['organizationId'] as string) ?? period.organizationId;
+
+    const periodRoles = await this.prisma.rolePermission.findMany({
+      where: { permission: { in: ['period:open', 'period:close'] } },
+      select: { role: true },
+    });
+    const roles = [...new Set(periodRoles.map((r) => r.role))];
+    if (roles.length === 0) return;
+
+    // Scoped to THIS organization's assignments: a finance_director in another org
+    // has no business being told about this org's period changes.
+    const assignments = await this.prisma.userRoleAssignment.findMany({
+      where: { organizationId, role: { in: roles } },
+      select: { userId: true },
+    });
+
+    // Deduplicated: one user holding both period:open and period:close, or the same
+    // role in two departments, must not be emailed twice about one close.
+    const recipientIds = [...new Set(assignments.map((a) => a.userId))];
+    if (recipientIds.length === 0) {
+      this.logger.debug(
+        `No users hold period permissions in organization ${organizationId} — ` +
+          `skipping ${templateType} notification for period ${period.id}`,
+      );
+      return;
+    }
+
+    const periodLabel = `${period.startDate.toISOString().slice(0, 10)} to ${period.endDate
+      .toISOString()
+      .slice(0, 10)}`;
+
+    for (const recipientUserId of recipientIds) {
+      await this.enqueue({
+        recipientUserId,
+        templateType,
+        templateData: {
+          periodLabel,
+          // Only PeriodReopened carries a reason, and #48 makes it mandatory at the
+          // domain layer, so the fallback is defensive rather than expected.
+          ...(templateType === 'PeriodReopened'
+            ? { reason: (event.payload['reason'] as string) ?? 'No reason provided' }
+            : {}),
+        },
+      });
+    }
+  }
+
   private async enqueue(resolution: RecipientResolution): Promise<void> {
     await this.queue.add(NOTIFICATION_JOB, resolution);
   }

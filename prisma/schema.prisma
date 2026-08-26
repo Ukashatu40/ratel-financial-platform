@@ -503,6 +503,10 @@ model AuditLogEntry {
   source         String
   prevHash       String   @map("prev_hash")
   entryHash      String   @map("entry_hash")
+  // Which computeEntryHash* scheme produced entryHash. Defaults to 1 so rows written
+  // before v2 existed are labelled correctly with no backfill; v2 additionally covers
+  // oldValue/newValue/reason. A verifier must pick its function by this column.
+  hashVersion    Int      @default(1) @map("hash_version")
   createdAt      DateTime @default(now()) @map("created_at")
 
   @@index([entityType, entityId])

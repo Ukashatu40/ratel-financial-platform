@@ -122,16 +122,159 @@ overlap between them — the actual disclosure concern this item was about.
 No backfill was needed since only one organization has ever existed to
 date, so historical data already trivially satisfies per-org ordering. 
 
-### 8. No field-level old/new value diffing
-**Where:** `AuditSubscriber`
-**What:** Captures each domain event's full payload as `newValue`; does not
-compute or store a genuine before/after diff of specific fields on direct
-edits. This is event-sourced-style audit (full history reconstructible from
-events), which satisfies "never lose history," but is not the same guarantee
-as literal per-field old/new values implied by the original schema design.
-**To close:** Would require every mutating aggregate method to capture and
-pass forward an explicit diff — a materially larger change touching every
-aggregate, not just the audit subscriber.
+### 8. ~~No field-level old/new value diffing~~ — RESOLVED
+**What it was:** `AuditSubscriber` captured each event's payload as `newValue` and
+left `oldValue` NULL. The column had existed since the first audit migration
+(`20260802090359/migration.sql:31`) and **nothing had ever written to it** —
+`oldValue` appeared nowhere in `src/` or `test/`. The trail recorded that something
+changed, never what it changed from.
+
+**The original "to close" was wrong about the cost.** It predicted "every mutating
+aggregate method must capture and pass forward an explicit diff." That turned out to
+be unnecessary: the diff is computed **generically in `AggregateRoot`**, once, and no
+mutating method was touched. Two preconditions made that possible, both verified
+before committing to the approach rather than assumed:
+- All four aggregates already exposed `toProps()`.
+- Every one of the 13 `recordEvent` call sites mutates `this.props` **before**
+  recording. So at record time, current state is the after-image and the captured
+  baseline is the before-image.
+
+Each aggregate contributes one line (`snapshotState() { return this.toProps(); }`)
+plus a `captureBaseline()` call in `reconstitute()`. `snapshotState` is **abstract**
+on purpose: a new aggregate must decide consciously instead of silently contributing
+no diff and leaving an audit gap nothing would flag.
+
+`AggregateRoot.recordEvent` merges `changes: { field: { from, to } }` into the
+payload; `AuditSubscriber` lifts the `from` side into `oldValue`. The baseline
+advances at every `recordEvent`, so a second mutation in the same unit of work diffs
+against the intermediate state — without that, a close-then-reopen would report
+`status: open -> reopened` and hide that the period passed through `closed`.
+
+`create()` deliberately does **not** capture a baseline, so creation events carry no
+`changes` and `oldValue` stays NULL. "Nothing existed before" is the honest record; a
+diff against an imaginary empty row would be a fabrication.
+
+**Three blind spots this approach does NOT cover** — stated because a props diff
+structurally cannot see them, not because they were overlooked. See #52.
+
+**The hash did not cover the payload, so the diff was added under a new hash
+version.** `HashableEntry` covered only organizationId/entityType/entityId/action/
+actorUserId/correlationId/createdAt — `oldValue`, `newValue` and `reason` were
+excluded, meaning the entire substance of an entry could be rewritten without
+breaking the chain. `computeEntryHashV2` now covers them, with a
+`hash_version` column defaulting to 1 so existing rows stay verifiable under v1 and
+a future verifier picks its function per row. No backfill needed.
+
+**A real trap, caught by reasoning and then proven by test.** `old_value`/`new_value`
+are `jsonb`, which does not preserve key insertion order. Hashing with plain
+`JSON.stringify` would produce hashes **no verifier could ever reproduce from the
+stored row** — invisible today (nothing verifies) and surfacing later as every
+historical row appearing tampered. v2 therefore uses `canonicalStringify`
+(recursively sorted keys) from the new
+`src/shared-kernel/serialization/canonical-json.ts`.
+
+This was **verified by falsification, not just asserted**: with `canonicalStringify`
+swapped for `JSON.stringify`, the integration test fails with two concrete differing
+hashes; restored, it passes. So jsonb really does reorder keys here, the test really
+detects it, and the fix really is what closes it.
+
+**`audit:view` was an orphaned permission.** Seeded for `auditor`
+(`role-permissions.ts:34`) and referenced **nowhere in code** — the role held a
+permission that guarded nothing, and the trail was reachable only via psql. So
+`GET /audit-entries` was built alongside this, in a new top-level
+`src/audit-log/` supporting module following #47's `src/event-deliveries/`
+precedent — **not** a bounded context (no aggregate, no state machine) and
+deliberately **not** in `src/shared-kernel/audit/`, since a controller there would
+put HTTP concerns inside the layer every context depends on, inverting the Phase 4.3
+dependency rule. Writing stays in the kernel; reading is a supporting concern.
+
+Filters (`entityType`, `entityId`, `actorUserId`, `action`, `from`/`to`, `offset`,
+`limit`) are validated at the boundary so a bad value is a specific 400 rather than a
+Prisma error rendered as a useless 500 (convention #5). `limit` is capped at 500: an
+audit trail is unbounded, unlike #47's operator views, so it genuinely needs paging.
+`entityType`/`action` are deliberately **not** `@IsIn` over a fixed list — entity
+types come from each event's `aggregateType` and reference-data contributes its own,
+so a closed enum would silently stop matching new auditable types, failing in the
+direction of "no history found".
+
+**Coverage:** 13 unit tests (diff semantics, baseline advance, `Money`/`Date`
+normalization, create-vs-reconstitute, canonical JSON properties), 4 new integration
+tests including the jsonb round-trip proof, and 7 e2e tests. The e2e set asserts
+`oldValue.status === 'open'` after a real close through the full path (HTTP →
+aggregate → outbox → BullMQ poller → subscriber → Postgres), NULL `oldValue` for a
+creation event, a **403 for `finance_director`** on `GET /audit-entries` (so the 200
+for `auditor` cannot be explained by the guard never running), an exact response key
+set (#21) with `organizationId` absent (#22/#47), a cross-org entry excluded, and
+400s for an unknown query param, a malformed date and an over-cap limit.
+
+### 52. Three audit blind spots a props diff cannot see
+**Where:** `PayrollRun` and `SalaryStructure` aggregates.
+**What:** #8's generic diff compares an aggregate's own `props` before and after a
+mutation. Three real state changes fall outside that:
+1. **`SalaryStructure` records ZERO events.** It has `recordEvent` available and never
+   calls it, so compensation changes — arguably the most sensitive data in the system
+   — produce no audit entry at all. Not a diff gap: a total absence of audit.
+2. **`PayrollRun.startProcessing()` changes `status` to `processing` and records no
+   event.** The transition into processing is invisible to the trail, so the history
+   jumps from `approved` to `completed`.
+3. **`PayrollRun.addPayslip()` mutates `this.payslips`, a sibling array, not `props`.**
+   It does record `PayrollRunPayslipAdded`, so the action is audited, but the event
+   carries no `changes` and its `old_value` is NULL — the payslip count before and
+   after is not recoverable from the entry.
+
+**Why not fixed with #8:** (1) and (2) are missing domain events, not diff plumbing —
+adding them changes what flows through the outbox and what every global subscriber
+sees, which is event-pipeline work deserving its own review (CLAUDE.md asks before
+altering the event pipeline). (3) needs `snapshotState()` to include derived child
+state, which is a design question about what "the aggregate's state" means for diffing
+rather than a bug.
+**To close:** decide whether `SalaryStructure` should emit lifecycle events (almost
+certainly yes, given what it holds), add a `PayrollRunProcessingStarted` event, and
+consider including `payslipCount` in `PayrollRun.snapshotState()`.
+
+### 53. No audit chain verifier exists — the tamper-detection guarantee is unimplemented
+**Where:** `src/shared-kernel/audit/hash-chain.util.ts`
+**What:** the comment on `computeEntryHash` states that tampering is "detectable by
+recomputing the chain". **Nothing recomputes it.** `computeEntryHash`/`V2` have
+exactly one caller — `AuditLogService.record()` — and the existing tests check only
+*linkage* (each row's `prevHash` equals the prior row's `entryHash`), never that a
+row's hash matches its own content. A row could be edited and its `entryHash`
+recomputed by an attacker, or edited without touching the hash, and no code path in
+this system would notice.
+
+Linkage checks are not worthless — they catch a row deleted or reordered mid-chain —
+but they are strictly weaker than what the comment promises, and the promise is the
+kind of thing an auditor would rely on.
+
+**Why now:** #8 made this tractable. `hash_version` exists, so a verifier can pick
+`computeEntryHash` for v1 rows and `computeEntryHashV2` for v2 rows instead of
+reporting every historical row as tampered. That was the blocking problem.
+**To close:** a `ChainVerifierService` that walks a single organization's chain in
+`createdAt` order, recomputes each row's hash under its own `hash_version`, and
+reports the first mismatch with its row id — plus `GET /audit-entries/verify` behind
+`audit:view`. Note the honest limit it will still have, and say so in its response:
+verification proves entries were not **altered**; it cannot prove none were
+**missing**, because a chain with an entry removed and subsequent hashes recomputed
+is still internally consistent. That is the same gap #47 records for a
+permanently-failed `AuditSubscriber` delivery.
+
+### 54. `jsonb` numeric normalization is an unhandled residual risk in hash v2
+**Where:** `src/shared-kernel/serialization/canonical-json.ts`
+**What:** `canonicalStringify` handles jsonb's key reordering, which is the failure
+mode that would have broken hash v2 immediately. jsonb performs two other
+normalizations it does **not** handle: numbers are canonicalized (`1.0` stored and
+returned as `1`, `1e2` as `100`) and duplicate keys are dropped. If an audit payload
+ever contains a float whose textual form changes on round-trip, the recomputed hash
+will not match and the row will look tampered.
+**Why acceptable now:** audit payloads are event payloads, which carry strings,
+booleans, null and small integers. `Money` serializes `minorUnits` as a **string**
+precisely so bigint amounts never become floats (convention #1), so the most
+likely source of a problematic number is already excluded by design.
+**To close:** either normalize numbers to a canonical decimal string inside
+`toJsonSafe`, or — better — have the future verifier (#53) hash the **raw jsonb text**
+returned by Postgres (`SELECT new_value::text`) rather than a re-serialized JS object,
+which sidesteps every normalization question at once. Worth deciding when #53 is
+built, since that is the only consumer that would care.
 
 ### 9. ~~Failed event delivery to one subscriber is only logged, not retried~~ — RESOLVED
 **Why this mattered more than the original wording suggested:** `AuditSubscriber`

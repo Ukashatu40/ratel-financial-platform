@@ -167,7 +167,13 @@ export class Expense extends AggregateRoot {
   }
 
   static reconstitute(props: ExpenseProps): Expense {
-    return new Expense(props);
+    const expense = new Expense(props);
+    expense.captureBaseline();
+    return expense;
+  }
+
+  protected snapshotState(): Record<string, unknown> {
+    return this.toProps();
   }
 
   // --- Behavior / state machine ---

@@ -86,7 +86,12 @@ export class PayrollRun extends AggregateRoot {
   static reconstitute(props: PayrollRunProps, payslips: Payslip[]): PayrollRun {
     const run = new PayrollRun(props);
     run.payslips = payslips;
+    run.captureBaseline();
     return run;
+  }
+
+  protected snapshotState(): Record<string, unknown> {
+    return this.toProps();
   }
 
   /**
