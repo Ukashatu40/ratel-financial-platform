@@ -557,6 +557,43 @@ nullable column at all. Must be fixed before any endpoint allows users to
 self-assign or admins to assign roles through the API — right now it's a
 seed-only quirk with no production exposure.
 
+**Investigated 2026-08-21, and the attractive third option does NOT exist.**
+PostgreSQL 15 (this project's version) supports `UNIQUE NULLS NOT DISTINCT`, which
+would make the EXISTING constraint behave exactly as intended — no sentinel, no
+table split, no reshaping. Prisma's schema language cannot express it: adding
+`@@unique([userId, role, departmentId], nullsNotDistinct: true)` fails
+`prisma validate` outright (checked against a throwaway copy of the schema rather
+than assumed). The string appears in `@prisma/studio-core`'s driver code but not in
+the schema engine.
+
+That leaves only hand-written SQL for either `NULLS NOT DISTINCT` or the equivalent
+partial index
+(`CREATE UNIQUE INDEX … ON user_role_assignments (user_id, role) WHERE department_id IS NULL`).
+Both are expected to fight `migrate dev`: Prisma derives the expected database state
+by replaying migrations into a shadow database and diffing it against
+`schema.prisma`, so an index the schema does not declare reads as drift and gets a
+generated migration to drop it. That is the same trap #15 records for native
+partitioning. **Caveat on this specific point:** the `prisma validate` rejection was
+verified directly; the drift consequence is Prisma's documented diffing behaviour
+plus #15's recorded experience, and was not separately re-run here.
+
+**So this stays OPEN, deliberately, with no partial fix applied.** Working around
+the nullable column with raw SQL that Prisma will fight is worse than the current
+state, which is a seed-only quirk with **no production exposure** — reconfirmed:
+`userRoleAssignment` still has only `findMany`/`findFirst` reads outside the seed
+script, so nothing in the API can create a duplicate. The trigger condition this
+item names has not arrived.
+
+**Recommendation for whoever closes it:** prefer (b), the table split. Option (a)'s
+sentinel keeps the nullable column and adds a lie — `departmentId` holding an
+organization id — and every existing `departmentId === null` check (permission
+guard, `EffectiveScopeResolver`, seed) would have to change meaning in lockstep,
+which is a silent-drift risk across security-relevant code. (b) removes the nullable
+column from the constraint entirely, so the DB enforces the rule natively with no
+raw SQL and nothing for Prisma to fight. It is the larger change, but it is the one
+that ends the problem instead of routing around it — and the right moment for it is
+when the role-assignment API is built, not before.
+
 ## Performance
 
 ### 15. `expenses` table is not actually partitioned
@@ -1291,7 +1328,263 @@ endpoint would have returned `{requeued: true}` and done nothing.
 
 ---
 
-*Last updated: 2026-08-20. Most recently: **closed #47** (operator API over failed
+## Financial Period — Lifecycle
+
+### 48. ~~A closed period could never be reopened, permanently stranding in-flight records~~ — RESOLVED
+**Where:** `src/contexts/financial-period/` — `ReopenPeriodHandler`,
+`ListPeriodsHandler`, `GetPeriodByIdHandler`, and their command/query/DTO/route.
+**What was broken:** closing a period is enforced by **nine** call sites across
+Expense and Payroll (submit/approve/reject/cancel, add-payslip/submit/approve/
+reject), every one throwing `PeriodClosedError` once the period is not open.
+Nothing could undo a close. So an expense sitting in `pending_approval` when its
+period closed could be neither approved **nor** rejected — stranded permanently,
+through entirely ordinary use (close the month, then find an expense nobody got
+to). `FinancialPeriod.reopen()` and `PeriodStatus.reopened` already existed, and
+`OPEN_STATUSES` already included `'reopened'`; only the application path to them
+was missing, so all nine call sites started working again with **no changes
+outside this context**.
+
+**The reason is required, and required in three places on purpose.** It is on
+`ReopenPeriodDto` (`@IsString @IsNotEmpty @MaxLength(500)`), on
+`ReopenPeriodCommand`, and re-checked inside `FinancialPeriod.reopen()`. Not
+redundancy: `@IsNotEmpty` rejects `''` but treats `'   '` as present, so the
+aggregate's `trim()` is what actually closes that gap, and the aggregate owns the
+invariant for any future route that doesn't come through this DTO. The trimmed
+value is what reaches the event, so a reason cannot be whitespace-padded into
+meaninglessness.
+
+**Why the reason lands on the `PeriodReopened` payload specifically:** verified
+against the code rather than assumed — `AuditSubscriber` (registered globally)
+lifts `payload['reason']` into `AuditLogService.record({ reason })`, which writes
+the audit entry's own `reason` column, and `'reopenedById'` is already in that
+subscriber's `ACTOR_KEYS`, so it also populates `actorUserId`. Putting both on the
+payload is therefore the entire implementation of "reopening a closed financial
+period is always attributable and always has a stated cause" — zero audit-side
+code, which is the Conformist subscriber's whole point.
+
+**Decisions worth recording, each having had a defensible alternative:**
+- **Reopen reuses `period:open`, no new permission.** Reopening is the same
+  authority as opening, and inventing `period:reopen` would have required a seed
+  row plus a `prisma:seed` re-run (critical convention #2) to grant nobody any
+  capability they didn't already have. Confirmed `period:open` is seeded for
+  `finance_director` at `organization` scope.
+- **`PeriodReopenReasonRequiredError extends DomainError`**, not bare `Error`,
+  so `ProblemDetailsFilter` renders a real 400. A bare `Error` here would have
+  surfaced the whitespace-only case as a useless 500 (critical convention #5).
+- **Discovery had to be built alongside reopen, not deferred.** `findCurrentOpen`
+  matches `OPEN_STATUSES` only, so `GET /financial-periods/current` can never
+  return a **closed** period — exactly the id a reopen needs. Without `GET
+  /financial-periods` (+ status filter) and `GET /:id`, reopen would have been an
+  endpoint whose only input was unobtainable through the API.
+- **`GET /:id` is declared after `GET /current`** deliberately — route matching
+  is order-sensitive, and a `':id'` registered first swallows `/current` and
+  treats it as a period id.
+- **Cross-organization reads and writes return 404, not 403**, resolved via a new
+  `findByIdForOrganization` that puts both predicates in one query rather than
+  fetch-then-compare. "Not yours" is indistinguishable from "does not exist", so
+  the endpoints can't enumerate foreign period ids (#43's reasoning).
+
+**Coverage:** 27 unit tests across the aggregate, `ReopenPeriodHandler`, and the
+two query handlers, plus 11 e2e cases (the spec now holds 13 — #49 added the other
+two, and its own 5 unit tests, when it org-scoped close). All green against real
+Postgres + Redis + MinIO + ClamAV via Testcontainers. The e2e test that carries the
+weight
+asserts the **stranding first** — the 409 on both approve *and* reject while
+closed — so a passing reopen afterwards cannot be explained by the expense having
+been approvable all along. Also covered: a 403 for a role without `period:open`
+(so a 201 can't be explained by the guard never running), a cross-org 404 that
+additionally asserts the foreign period was left **untouched**, and the audit
+assertion checking `reason`, `newValue.reopenedById` **and** `actorUserId`
+end-to-end through the real outbox poller.
+
+### 49. ~~`ClosePeriodHandler` is not organization-scoped, though its command implies it is~~ — RESOLVED
+**What it was:** `ClosePeriodCommand` took `organizationId` as its first
+constructor argument and `ClosePeriodHandler.execute()` **never read it**. The
+lookup was `repo.findById(cmd.periodId, tx)` with no organization predicate, so any
+caller holding `period:close` could close **another organization's** period by id —
+a cross-tenant write. The parameter looked load-bearing and was not, the same
+failure mode #3 removed the decorative `scope` argument from `@RequirePermission`
+for. Found while building #48's reopen path, which deliberately did not repeat it.
+
+**Fixed** by switching the lookup to
+`findByIdForOrganization(cmd.periodId, cmd.organizationId, tx)` — the port method
+#48 had already added, so close and reopen now resolve periods identically and the
+asymmetry between them is gone. Both predicates go in one query rather than
+fetch-then-compare, so there is no window in which the ownership check and the read
+can disagree, and "not yours" is indistinguishable from "does not exist" (#43's
+reasoning) — cross-organization close returns 404, not 403.
+
+**`findById` was audited and deliberately kept, not deleted.** The close-out note
+on this item suggested removing it so the unscoped lookup couldn't be reintroduced
+by habit, but it has one legitimate remaining caller: `PeriodStatusAdapter.isOpen()`,
+which fetches and then compares `period.organizationId !== organizationId` itself.
+That is safe — it returns a boolean and mutates nothing — so deleting the method
+would have meant rewriting a correct call site for no behavioural gain. The port's
+doc comment now says this explicitly and directs new write-preceding lookups to the
+scoped method instead, which is the durable version of the same protection. The one
+integration spec that exercises `findById` directly is likewise untouched.
+
+**Coverage:** an e2e regression test closes an **open** foreign period and asserts
+404 — open specifically, because the old unscoped `findById` would have found it and
+returned 201, so the test fails against the previous code for the right reason. It
+then asserts the foreign period is untouched on `status`, `closedAt` **and**
+`closedById`: a partially-applied close that wrote the metadata while leaving the
+status alone would be worse than a wrong status, and only those assertions catch it.
+A positive control sits in the same describe block (own-organization close still
+returns 201 and records `closedById`), so the 404 cannot be read as close having
+broken for everyone (#3b's reasoning).
+
+Also added the **first unit spec `ClosePeriodHandler` has ever had** (5 tests). Its
+having none is why a decorative constructor argument survived unnoticed for this
+long — worth noting as the actual root cause rather than just fixing the symptom.
+The scoping test asserts both that the scoped lookup was called and that
+`findById` was **not**, since checking only the former would still pass if someone
+reinstated the unscoped call alongside it.
+
+### 50. ~~`InvalidPeriodDatesError` extends bare `Error`, not `DomainError`~~ — RESOLVED
+**What it was:** a violation of critical convention #5. `FinancialPeriod.create()`
+throws `InvalidPeriodDatesError` when `endDate <= startDate`, and because it wasn't
+a `DomainError` subclass it fell through `ProblemDetailsFilter`'s final branch.
+
+**The consequence was worse than the wrong status code**, which is worth recording
+because the original entry understated it. That fallback branch does not merely
+default to 500 — it replaces the message with the fixed string `'An unexpected error
+occurred'`. So `POST /financial-periods` with a reversed date range returned a 500
+that told the caller nothing at all about what was wrong with their request, even
+though the domain had produced a perfectly clear message. Verified by reading
+`problem-details.filter.ts` rather than assumed.
+
+**Fixed** by extending `DomainError` with `code = 'invalid-period-dates'` and
+`httpStatus = 400`. The explicit `this.name = ...` assignments were dropped
+throughout — `DomainError`'s constructor already sets `this.constructor.name`.
+
+**The sibling audit this item asked for was done, and it found three more.** All
+nine bare-`Error` subclasses in `src` were traced to their throw sites and call
+paths:
+
+*Fixed, because they are HTTP-reachable and were producing the same swallowed 500:*
+- `NetPayExceedsGrossPayError` (`payslip.entity.ts`) → 400 `net-pay-exceeds-gross-pay`.
+  `Payslip.generate()` is called from `AddPayslipHandler`, so this discarded the
+  "check deduction totals" hint the message exists to give.
+- `InvalidCurrencyError` (`money.vo.ts`) → 400 `unsupported-currency`. Reachable
+  through `POST /expenses`: `CreateExpenseDto` validates `@Length(3, 3)` but **not**
+  that the code is one of `NGN/USD/EUR/GBP`, so any other three-letter code reaches
+  `Money.of()`. Confirmed by reading the DTO and `currency-code.ts` together — this
+  is ordinary bad input, not a contrived case.
+
+*Correctly left bare, with the reasoning already documented in-tree at
+`domain-event-dispatcher.ts:31-39`* — these are wiring/programmer errors raised at
+module init or inside a background worker, where there is no HTTP response to render
+into: `DuplicateSubscriberNameError`, `UnknownSubscriberError`, `CsvParseError`.
+`CsvRowValidationError` and `ImportMappingError` are likewise correct: both are
+caught at `import-job.processor.ts:115` and recorded as per-row import failures, so
+they never reach the filter.
+
+*One left open as a genuine design question:* `CurrencyMismatchError` — see #51.
+
+**Coverage:** three e2e regression tests, each asserting the RFC 7807 `type` and
+`detail` rather than only the status, since a status-only assertion could pass for
+the wrong reason. A reversed date range returns 400 `invalid-period-dates` and
+persists nothing; an unsupported currency returns 400 `unsupported-currency` naming
+`XYZ`; and a positive control opens a period with a valid range (nothing else in
+that spec exercised `POST /financial-periods` at all — every other period is
+inserted through Prisma directly). Full suite green: 303 unit, 36 integration, 88
+e2e.
+
+Note the tests were **not** observed failing against the old code — that the
+`.expect(400)` would have failed is read directly off the filter's fallback branch
+returning 500, which is unambiguous, rather than demonstrated by a run.
+
+### 51. ~~`CurrencyMismatchError` is a bare `Error`, and its correct status is a real question~~ — RESOLVED
+Took option (a) from this item's own analysis: `CurrencyMismatchError` now
+extends `DomainError` with `httpStatus: 500` — the status stays honest
+(this is a programmer error: application code added two different
+currencies together, not something a client caused), but
+`ProblemDetailsFilter` now renders the real message instead of discarding
+it into the generic `'An unexpected error occurred'` fallback.
+
+**No e2e test was added, deliberately, not by oversight.** Every call site
+of `Money.add()` in the codebase was traced: `PayrollRun.totalGrossPay()`
+is the only real caller, and `AddPayslipHandler` hardcodes a single
+currency for every payslip in a run, so there is currently no path through
+the API that constructs two different-currency `Money` values and adds
+them. With multi-currency support itself not yet started, fabricating an
+HTTP path just to claim e2e coverage would misrepresent what the system
+can actually do today. Covered instead by 3 unit tests asserting the
+`DomainError` shape (`instanceof` check, `code`/`httpStatus`/`message`
+values, and the same-currency non-throwing case) — the correct and honest
+level of coverage for a currently-unreachable defensive invariant.
+
+**Closes the audit #50 opened.** All nine bare-`Error` subclasses found in
+`src` have now been resolved: five converted to `DomainError`
+(`InvalidPeriodDatesError`, `NetPayExceedsGrossPayError`,
+`InvalidCurrencyError` under #50; `CurrencyMismatchError` here), and four
+correctly left bare with their reasoning already documented in-tree
+(`DuplicateSubscriberNameError`, `UnknownSubscriberError`, `CsvParseError`,
+plus `CsvRowValidationError`/`ImportMappingError`, which are caught and
+recorded as per-row import failures before ever reaching an HTTP response).
+
+
+---
+
+*Last updated: 2026-08-22. Most recently: **closed #51** —
+`CurrencyMismatchError` now extends `DomainError` (500,
+`currency-mismatch`), taking the option #50's audit recommended: keep the
+status honest (a programmer error, not client-caused) but stop discarding
+the real message into the generic fallback text. No e2e test was added —
+traced every `Money.add()` call site and found none reachable through the
+API today, since `AddPayslipHandler` hardcodes a single currency per run
+and multi-currency support hasn't started; fabricating a path would have
+misrepresented coverage, so this is unit-tested only, honestly. This
+closes out the full audit #50 opened: all nine bare-`Error` subclasses in
+`src` are now accounted for — five converted, four correctly left bare
+with their reasoning already in-tree.*
+
+*Earlier: 2026-08-21 — **closed #49** — `ClosePeriodHandler`
+resolved its period with the unscoped `findById` and never compared the
+`organizationId` its command had always carried, so `period:close` could close
+another organization's period. Now goes through `findByIdForOrganization`, the same
+lookup #48's reopen uses, ending the asymmetry between the two. `findById` was
+audited and **kept**: `PeriodStatusAdapter.isOpen()` is a legitimate caller that
+does its own org comparison on a read-only boolean, so the port comment now directs
+new write-preceding lookups to the scoped method instead of deleting a method a
+correct call site still needs. Covered by an e2e regression test that closes an
+**open** foreign period (open specifically — the old code would have returned 201),
+asserts 404, and checks the row is untouched on `closedAt`/`closedById` as well as
+`status`, plus a same-block positive control and the first unit spec the handler has
+ever had — its having none is why the decorative argument survived unnoticed. One
+**transient e2e failure** was observed during this verification: two tests in the
+unrelated `event-delivery-operator` spec failed on a `loginAs` 401, then passed
+85/85 on an immediate re-run and 13/13 in isolation. Root cause was not
+established, so no production change was made and no item was filed.*
+
+*Earlier the same day: **closed #48** — the financial-period
+reopen path, plus the period-discovery endpoints (`GET /financial-periods` with a
+status filter, `GET /:id`) that reopen is unusable without, since `GET /current`
+matches open statuses only and so can never surface the closed period id a reopen
+needs. The reopen **reason is required** at the DTO, the command, and the aggregate:
+`@IsNotEmpty` treats `'   '` as present, so the aggregate's `trim()` is the check
+that actually holds, and the trimmed value is what reaches the `PeriodReopened`
+payload. It lands on the payload because `AuditSubscriber` already lifts
+`payload['reason']` into the audit entry's `reason` column and already has
+`reopenedById` in its `ACTOR_KEYS` — verified by reading both, so the reason and
+the actor are recorded with zero audit-side code. Reuses `period:open` rather than
+adding a permission, so no re-seed is required. Also **filed #49** (`ClosePeriodHandler`
+accepts an `organizationId` and never compares it, so close is **not** org-scoped
+while the new reopen is — found while deliberately not repeating it, and silent
+until multi-tenancy makes it a real cross-tenant write) and **#50**
+(`InvalidPeriodDatesError` still extends bare `Error`, so a reversed date range
+degrades to a 500 instead of a 400). Both were referenced in code comments as
+"tracked separately" before any such entry existed; the comments now name the item
+numbers.*
+
+*Earlier the same day: **investigated #14** and applied no partial fix — PostgreSQL
+15 supports `UNIQUE NULLS NOT DISTINCT`, which would fix the constraint in place,
+but Prisma's schema language cannot express it (`prisma validate` rejects
+`nullsNotDistinct`, checked directly against a throwaway schema copy). See that
+entry for why raw SQL Prisma will fight is worse than the current seed-only quirk.*
+
+*Previously: 2026-08-20 — **closed #47** (operator API over failed
 event deliveries, in a new `src/event-deliveries/` supporting module, with
 `organizationId` denormalized onto the table and an `"unknown"` sentinel matching
 `AuditSubscriber`'s existing handling of the same question) and **#38** (attachment

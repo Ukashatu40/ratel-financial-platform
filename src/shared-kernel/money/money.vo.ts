@@ -1,5 +1,6 @@
 // src/shared-kernel/money/money.vo.ts
 import { CurrencyCode, isSupportedCurrency } from './currency-code';
+import { DomainError } from '../errors/domain-error';
 
 export interface MoneyJSON {
   minorUnits: string; // bigint as string — JSON has no native bigint
@@ -80,16 +81,40 @@ export class Money {
   }
 }
 
-export class InvalidCurrencyError extends Error {
+/**
+ * Extends DomainError, per critical convention #5 — a client-supplied currency is
+ * client input, so this is a 400. Reachable over HTTP: `CreateExpenseDto` validates
+ * `@Length(3, 3)` but NOT that the code is one this system supports, so any
+ * three-letter code Money doesn't know reaches `Money.of()` here. As a bare Error
+ * that surfaced as a 500 saying "An unexpected error occurred", hiding the one
+ * detail the caller needed. Fixed with TECH_DEBT #50.
+ *
+ * Safe to import DomainError here: `errors/domain-error.ts` imports nothing, so
+ * there is no cycle with the shared kernel's Money.
+ */
+export class InvalidCurrencyError extends DomainError {
+  readonly code = 'unsupported-currency';
+  readonly httpStatus = 400;
+
   constructor(currency: string) {
     super(`Unsupported currency: ${currency}`);
-    this.name = 'InvalidCurrencyError';
   }
 }
 
-export class CurrencyMismatchError extends Error {
+/**
+ * Deliberately still a bare Error, and NOT the same case as InvalidCurrencyError
+ * above — see TECH_DEBT #51. This is thrown by `assertSameCurrency()` during
+ * arithmetic, i.e. when application code combines two Money values of different
+ * currencies. That is a programmer error, not something a caller submitted, so a
+ * 500 is arguably the honest status; converting it to a 400 would blame the client
+ * for an internal bug. Left as a deliberate open question rather than silently
+ * decided.
+ */
+export class CurrencyMismatchError extends DomainError {
+  readonly code = 'currency-mismatch';
+  readonly httpStatus = 500;
+
   constructor(a: CurrencyCode, b: CurrencyCode) {
     super(`Currency mismatch: cannot operate on ${a} and ${b} directly`);
-    this.name = 'CurrencyMismatchError';
   }
 }

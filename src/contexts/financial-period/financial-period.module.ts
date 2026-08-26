@@ -6,6 +6,9 @@ import { PeriodStatusAdapter } from './infrastructure/adapters/period-status.ada
 import { PERIOD_STATUS_PORT } from '../../shared-kernel/period-status/period-status.port';
 import { OpenPeriodHandler } from './application/handlers/open-period.handler';
 import { ClosePeriodHandler } from './application/handlers/close-period.handler';
+import { ReopenPeriodHandler } from './application/handlers/reopen-period.handler';
+import { ListPeriodsHandler } from './application/handlers/list-periods.handler';
+import { GetPeriodByIdHandler } from './application/handlers/get-period-by-id.handler';
 import { GetCurrentOpenPeriodHandler } from './application/handlers/get-current-open-period.handler';
 import { FinancialPeriodController } from './presentation/controllers/financial-period.controller';
 
@@ -16,6 +19,9 @@ import { FinancialPeriodController } from './presentation/controllers/financial-
     { provide: PERIOD_STATUS_PORT, useClass: PeriodStatusAdapter },
     OpenPeriodHandler,
     ClosePeriodHandler,
+    ReopenPeriodHandler,
+    ListPeriodsHandler,
+    GetPeriodByIdHandler,
     GetCurrentOpenPeriodHandler,
   ],
   // PERIOD_STATUS_PORT exported so ExpenseModule / PayrollModule can import

@@ -1,7 +1,7 @@
 // src/contexts/financial-period/domain/aggregates/financial-period.aggregate.ts
 import { randomUUID } from 'crypto';
 import { AggregateRoot } from '../../../../shared-kernel/events/domain-event';
-import { InvalidStateTransitionError } from '../../../../shared-kernel/errors/domain-error';
+import { DomainError, InvalidStateTransitionError } from '../../../../shared-kernel/errors/domain-error';
 import { OPEN_STATUSES, PeriodStatusValue } from '../value-objects/period-status';
 import { periodClosed, periodClosing, periodOpened, periodReopened } from '../events/financial-period.events';
 
@@ -16,10 +16,30 @@ export interface FinancialPeriodProps {
   createdAt: Date;
 }
 
-export class InvalidPeriodDatesError extends Error {
+/**
+ * Both errors below extend DomainError, per critical convention #5, so
+ * ProblemDetailsFilter renders a real RFC 7807 400 naming the actual problem
+ * rather than swallowing it. A bare Error here does not merely lose the status
+ * code: the filter's fallback branch replaces the message with the fixed string
+ * "An unexpected error occurred", so the caller is told nothing about what they
+ * got wrong. `name` is not set explicitly — DomainError's constructor already
+ * assigns `this.constructor.name`.
+ */
+export class InvalidPeriodDatesError extends DomainError {
+  readonly code = 'invalid-period-dates';
+  readonly httpStatus = 400;
+
   constructor() {
     super('Financial period end_date must be after start_date');
-    this.name = 'InvalidPeriodDatesError';
+  }
+}
+
+export class PeriodReopenReasonRequiredError extends DomainError {
+  readonly code = 'period-reopen-reason-required';
+  readonly httpStatus = 400;
+
+  constructor() {
+    super('A reason is required to reopen a closed financial period');
   }
 }
 
@@ -74,12 +94,22 @@ export class FinancialPeriod extends AggregateRoot {
     this.recordEvent(periodClosed(this.props.id, this.props.organizationId, closedById));
   }
 
-  reopen(reopenedById: string): void {
+  reopen(reopenedById: string, reason: string): void {
     this.assertTransition('reopened', ['closed']);
+
+    // Checked here, not only in the DTO: the aggregate owns its invariants, and a
+    // "required" reason that accepts whitespace is not required. Reopening a
+    // closed financial period must never be recorded without a stated cause,
+    // whatever route reaches this method.
+    const trimmed = reason?.trim() ?? '';
+    if (trimmed.length === 0) throw new PeriodReopenReasonRequiredError();
+
     this.props.status = 'reopened';
     this.props.closedById = null;
     this.props.closedAt = null;
-    this.recordEvent(periodReopened(this.props.id, this.props.organizationId, reopenedById));
+    this.recordEvent(
+      periodReopened(this.props.id, this.props.organizationId, reopenedById, trimmed),
+    );
   }
 
   isOpen(): boolean {
