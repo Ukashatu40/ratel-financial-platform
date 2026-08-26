@@ -19,6 +19,7 @@ import { IntegrationModule } from './integration/integration.module';
 import { StorageModule } from './storage/storage.module';
 import { ObservabilityModule } from './observability/observability.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { EventDeliveriesModule } from './event-deliveries/event-deliveries.module';
 import { ReferenceDataModule } from './reference-data/reference-data.module';
 /**
  * Import order matters for readability, not execution — ConfigModule and
@@ -42,6 +43,7 @@ import { ReferenceDataModule } from './reference-data/reference-data.module';
     ObservabilityModule,
     JobsModule, // <-- add, after Encryption/SharedKernel since it depends on both
     NotificationsModule,
+    EventDeliveriesModule, // operator surface over failed_event_deliveries (#47)
     ReferenceDataModule,
     FinancialPeriodModule,
     ExpenseModule,

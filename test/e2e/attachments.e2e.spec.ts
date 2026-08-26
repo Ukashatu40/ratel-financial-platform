@@ -4,7 +4,7 @@ import { hash } from 'argon2';
 import { NestFastifyApplication } from '@nestjs/platform-fastify';
 import { createTestApp } from './setup/app.helper';
 import { cleanE2eDatabase, getE2eDbClient } from './setup/e2e-db-helper';
-import { describe, expect, it, beforeAll, beforeEach, afterAll } from '@jest/globals';
+import { describe, expect, it, beforeAll, beforeEach, afterAll, afterEach } from '@jest/globals';
 
 const MINIMAL_VALID_PDF = Buffer.from(
   '%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\nxref\n0 4\n0000000000 65535 f \ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n0\n%%EOF',
@@ -27,6 +27,58 @@ describe('Attachments (e2e)', () => {
     // unguarded app.close() throws a second error that REPLACES the real
     // bootstrap failure in Jest's output, hiding why the suite actually failed.
     await app?.close();
+  });
+
+  /**
+   * Waits for the async ClamAV scan to reach a terminal state, instead of guessing
+   * how long it takes. Replaces the fixed `setTimeout(5000)` this file used to
+   * sleep twice — a hard-coded wait is a latent flake that fires whenever the suite
+   * gets busier, which is exactly what happened to the CSV import spec once another
+   * spec file was added (commit f714ba1).
+   */
+  async function waitForScanToSettle(attachmentId: string, timeoutMs = 25000): Promise<boolean> {
+    const prisma = getE2eDbClient();
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const row = await prisma.attachment.findUnique({ where: { id: attachmentId } });
+      if (row && row.scanStatus !== 'unscanned') return true;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    return false;
+  }
+
+  /**
+   * TECH_DEBT #38 — closes the scan-vs-cleanup race at its source.
+   *
+   * `beforeEach`'s `cleanE2eDatabase()` truncates `attachments`, and a scan job
+   * still in flight from the PREVIOUS test would then update a row that no longer
+   * exists: a caught, logged, retried-to-permanent-failure Prisma `P2025`. It never
+   * failed a test — the orphaned scan simply failed against a target correctly gone
+   * — but it put misleading errors in the output of whichever test happened to run
+   * next, which is worse than it sounds when reading a real failure.
+   *
+   * Draining here rather than in `beforeEach` so the wait is attributed to the test
+   * that actually created the work.
+   *
+   * Deliberately warns rather than throwing: this is cleanup hygiene, not an
+   * assertion. A scanner genuinely wedged (ClamAV down) should surface as the
+   * scan-dependent tests failing on their own assertions, not as an opaque teardown
+   * error on every test in the file. Silence is not an option either — that is how
+   * the original noise went unexplained for so long — so the timeout is reported.
+   */
+  afterEach(async () => {
+    const prisma = getE2eDbClient();
+    const deadline = Date.now() + 25000;
+    while (Date.now() < deadline) {
+      const pending = await prisma.attachment.count({ where: { scanStatus: 'unscanned' } });
+      if (pending === 0) return;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    const stuck = await prisma.attachment.count({ where: { scanStatus: 'unscanned' } });
+    console.warn(
+      `[attachments.e2e] ${stuck} attachment scan(s) had not settled before cleanup; ` +
+        'expect P2025 noise from the orphaned scan job (TECH_DEBT #38).',
+    );
   });
 
   beforeEach(async () => {
@@ -110,9 +162,10 @@ describe('Attachments (e2e)', () => {
 
     const attachmentId = uploadRes.body.attachmentId;
 
-    // Scan runs async — wait for it to complete before attempting download,
-    // since downloads are now correctly blocked while scanStatus: 'unscanned'.
-    await new Promise((r) => setTimeout(r, 5000));
+    // Scan runs async — wait for it to reach a terminal state before attempting
+    // download, since downloads are correctly blocked while scanStatus is
+    // 'unscanned'. Polled, not slept: see waitForScanToSettle.
+    expect(await waitForScanToSettle(attachmentId)).toBe(true);
 
     const urlRes = await request(server)
       .get(`/api/v1/expenses/${expenseId}/attachments/${attachmentId}/download-url`)
@@ -191,7 +244,7 @@ describe('Attachments (e2e)', () => {
       .attach('file', EICAR, { filename: 'eicar.pdf', contentType: 'application/pdf' })
       .expect(201);
 
-    await new Promise((r) => setTimeout(r, 5000)); // wait for scan
+    expect(await waitForScanToSettle(uploadRes.body.attachmentId)).toBe(true);
 
     await request(server)
       .get(`/api/v1/expenses/${expenseId}/attachments/${uploadRes.body.attachmentId}/download-url`)

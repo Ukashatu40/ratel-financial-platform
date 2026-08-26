@@ -49,6 +49,19 @@ const MATRIX: Array<{ role: string; permission: string; scope: string }> = [
 
   { role: 'accountant', permission: 'notification:manage', scope: 'organization' },
   { role: 'finance_director', permission: 'notification:manage', scope: 'organization' },
+
+  // Operator surface over failed_event_deliveries (TECH_DEBT #47). Granted to the
+  // same two roles as notification:manage, which is the closest precedent — #33/#35
+  // built the identical see-it-then-redrive-it pair for notifications.
+  //
+  // `auditor` was considered and deliberately excluded: a permanently-failed
+  // AuditSubscriber delivery IS an auditor's concern, but this single ':manage'
+  // permission bundles reading with redriving, and redelivery is an operational
+  // action rather than an audit one. If read-only visibility for auditors is
+  // wanted, the right move is to split this into 'event-delivery:view' and
+  // 'event-delivery:retry' rather than to widen this grant.
+  { role: 'accountant', permission: 'event-delivery:manage', scope: 'organization' },
+  { role: 'finance_director', permission: 'event-delivery:manage', scope: 'organization' },
 ];
 
 export async function seedRolePermissions(prisma: PrismaClient) {

@@ -19,6 +19,57 @@ enum OutboxStatus {
   failed
 }
 
+enum EventDeliveryStatus {
+  pending_retry
+  recovered
+  permanently_failed
+}
+
+/// One row per (outbox event, subscriber) pair that failed delivery
+/// (TECH_DEBT #9). Before this, DomainEventDispatcher logged a failed
+/// subscriber and moved on, so a transient failure in AuditSubscriber lost that
+/// audit entry permanently — and undetectably, since the audit hash chain
+/// proves entries were not ALTERED but says nothing about one that was never
+/// written at all.
+///
+/// Deliberately has NO foreign key to OutboxEvent. A cascade would mean a
+/// future outbox retention/cleanup job silently deletes the record of a
+/// permanently-lost audit entry, which is precisely the evidence an operator
+/// needs. The redelivery worker therefore handles "outbox row is gone"
+/// explicitly instead of relying on referential integrity.
+model FailedEventDelivery {
+  id             String              @id @default(uuid())
+  outboxEventId  String              @map("outbox_event_id")
+  eventType      String              @map("event_type")
+  subscriberName String              @map("subscriber_name")
+  attempts       Int                 @default(1)
+  lastError      String              @map("last_error")
+  status         EventDeliveryStatus @default(pending_retry)
+  createdAt      DateTime            @default(now()) @map("created_at")
+  updatedAt      DateTime            @updatedAt @map("updated_at")
+
+  /// Denormalized from the outbox payload at record time so this table can be
+  /// scoped per organization like every other list endpoint (TECH_DEBT #47).
+  /// There is deliberately no FK to OutboxEvent (see the comment below), so a
+  /// join was not an option that survives outbox retention.
+  ///
+  /// NOT NULL with an "unknown" sentinel rather than nullable, matching what
+  /// AuditSubscriber already does for the identical problem
+  /// (`payload['organizationId'] ?? 'unknown'`). Recording a failure must never
+  /// itself fail — that is the whole point of #9 — so a missing payload field
+  /// degrades to unattributed, never to a thrown error or a lost row. The
+  /// default also makes this column safe to add to a table that already has
+  /// rows, with no separate backfill step.
+  organizationId String              @default("unknown") @map("organization_id")
+
+  // One row per pair, so repeated attempts update a single row rather than
+  // accumulating history that would make "is this still broken?" unanswerable.
+  @@unique([outboxEventId, subscriberName])
+  @@index([status, createdAt])
+  @@index([organizationId, status, createdAt])
+  @@map("failed_event_deliveries")
+}
+
 enum PeriodStatus {
   open
   closing

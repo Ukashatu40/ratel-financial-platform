@@ -32,9 +32,24 @@ export class NotificationSubscriber implements OnModuleInit {
   ) {}
 
   onModuleInit(): void {
-    this.dispatcher.register('ExpenseApproved', (e) => this.handleExpenseApproved(e));
-    this.dispatcher.register('ExpenseRejected', (e) => this.handleExpenseRejected(e));
-    this.dispatcher.register('PayrollRunApproved', (e) => this.handlePayrollRunApproved(e));
+    // Same subscriber name across all three types: it is one subscriber that
+    // happens to care about three events, and redelivery resolves the handler
+    // per event type, so there is no ambiguity.
+    this.dispatcher.register(
+      'ExpenseApproved',
+      (e) => this.handleExpenseApproved(e),
+      'NotificationSubscriber',
+    );
+    this.dispatcher.register(
+      'ExpenseRejected',
+      (e) => this.handleExpenseRejected(e),
+      'NotificationSubscriber',
+    );
+    this.dispatcher.register(
+      'PayrollRunApproved',
+      (e) => this.handlePayrollRunApproved(e),
+      'NotificationSubscriber',
+    );
   }
 
   private async handleExpenseApproved(event: DomainEvent): Promise<void> {
