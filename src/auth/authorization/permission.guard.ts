@@ -6,6 +6,7 @@ import { PERMISSION_KEY, PermissionRequirement } from './permission.decorator';
 import { UserPrincipal } from '../../shared-kernel/auth/user-principal';
 import { ResourceScopeRegistry } from '../../shared-kernel/auth/resource-scope-registry';
 import { EntityNotFoundError } from '../../shared-kernel/errors/domain-error';
+import { RoleName } from '@prisma/client';
 
 @Injectable()
 export class PermissionGuard implements CanActivate {
@@ -32,7 +33,7 @@ export class PermissionGuard implements CanActivate {
     }
 
     const grants = await this.prisma.rolePermission.findMany({
-      where: { role: { in: userRoles as any }, permission: requirement.permission },
+      where: { role: { in: userRoles as RoleName[] }, permission: requirement.permission },
     });
 
     if (grants.length === 0) {
