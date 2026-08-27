@@ -3,12 +3,25 @@ import { Injectable } from '@nestjs/common';
 import { QueryHandler } from '../../../../shared-kernel/cqrs/query-handler';
 import { PrismaService } from '../../../../prisma/prisma.service';
 import { ListAttachmentsQuery } from '../queries/list-attachments.query';
+import { ScanStatus } from '@prisma/client';
+
+export interface AttachmentSummaryView {
+  id: string;
+  fileName: string;
+  contentType: string;
+  sizeBytes: number;
+  scanStatus: ScanStatus;
+  createdAt: Date;
+}
 
 @Injectable()
-export class ListAttachmentsHandler implements QueryHandler<ListAttachmentsQuery, any[]> {
+export class ListAttachmentsHandler implements QueryHandler<
+  ListAttachmentsQuery,
+  AttachmentSummaryView[]
+> {
   constructor(private readonly prisma: PrismaService) {}
 
-  async execute(query: ListAttachmentsQuery) {
+  async execute(query: ListAttachmentsQuery): Promise<AttachmentSummaryView[]> {
     const attachments = await this.prisma.attachment.findMany({
       where: { expenseId: query.expenseId, organizationId: query.organizationId },
       orderBy: { createdAt: 'desc' },

@@ -89,7 +89,7 @@ export class PayrollRunController {
     const additionalLineItems: SalaryLineItem[] = (dto.additionalLineItems ?? []).map((item) => ({
       kind: item.kind,
       label: item.label,
-      amount: Money.of(BigInt(item.amountMinorUnits), DEFAULT_CURRENCY as any),
+      amount: Money.of(BigInt(item.amountMinorUnits), DEFAULT_CURRENCY),
     }));
 
     return this.addPayslip.execute(

@@ -8,6 +8,7 @@ import {
   EMAIL_PROVIDER,
   EmailProvider,
 } from '../../shared-kernel/notifications/email-provider.port';
+import { Prisma } from '@prisma/client';
 import {
   getSubjectFor,
   NotificationTemplateType,
@@ -52,7 +53,7 @@ export class NotificationProcessor extends WorkerHost {
         recipientUserId,
         channel: 'email',
         templateType,
-        templateData: templateData as any, // NEW — persisted now, needed for retry reconstruction
+        templateData: templateData as unknown as Prisma.InputJsonValue, // NEW — persisted now, needed for retry reconstruction
         status: 'pending',
       },
     });
