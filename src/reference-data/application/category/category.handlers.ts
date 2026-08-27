@@ -17,6 +17,7 @@ import {
   DeactivateCategoryCommand,
   UpdateCategoryCommand,
 } from './category.commands';
+import { ExpenseCategory as PrismaExpenseCategory } from '@prisma/client';
 import { GetCategoryByIdQuery, ListCategoriesQuery } from './category.queries';
 
 @Injectable()
@@ -103,9 +104,12 @@ export class DeactivateCategoryHandler implements CommandHandler<DeactivateCateg
 }
 
 @Injectable()
-export class GetCategoryByIdHandler implements QueryHandler<GetCategoryByIdQuery, any> {
+export class GetCategoryByIdHandler implements QueryHandler<
+  GetCategoryByIdQuery,
+  PrismaExpenseCategory
+> {
   constructor(private readonly prisma: PrismaService) {}
-  async execute(query: GetCategoryByIdQuery) {
+  async execute(query: GetCategoryByIdQuery): Promise<PrismaExpenseCategory> {
     const category = await this.prisma.expenseCategory.findFirst({
       where: { id: query.categoryId, organizationId: query.organizationId },
     });
@@ -115,9 +119,12 @@ export class GetCategoryByIdHandler implements QueryHandler<GetCategoryByIdQuery
 }
 
 @Injectable()
-export class ListCategoriesHandler implements QueryHandler<ListCategoriesQuery, any[]> {
+export class ListCategoriesHandler implements QueryHandler<
+  ListCategoriesQuery,
+  PrismaExpenseCategory[]
+> {
   constructor(private readonly prisma: PrismaService) {}
-  async execute(query: ListCategoriesQuery) {
+  async execute(query: ListCategoriesQuery): Promise<PrismaExpenseCategory[]> {
     return this.prisma.expenseCategory.findMany({
       where: {
         organizationId: query.organizationId,

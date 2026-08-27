@@ -17,6 +17,7 @@ import {
   DeactivateVendorCommand,
   UpdateVendorCommand,
 } from './vendor.commands';
+import { Vendor as PrismaVendor } from '@prisma/client';
 import { GetVendorByIdQuery, ListVendorsQuery } from './vendor.queries';
 
 @Injectable()
@@ -93,9 +94,9 @@ export class DeactivateVendorHandler implements CommandHandler<DeactivateVendorC
 }
 
 @Injectable()
-export class GetVendorByIdHandler implements QueryHandler<GetVendorByIdQuery, any> {
+export class GetVendorByIdHandler implements QueryHandler<GetVendorByIdQuery, PrismaVendor> {
   constructor(private readonly prisma: PrismaService) {}
-  async execute(query: GetVendorByIdQuery) {
+  async execute(query: GetVendorByIdQuery): Promise<PrismaVendor> {
     const vendor = await this.prisma.vendor.findFirst({
       where: { id: query.vendorId, organizationId: query.organizationId },
     });
@@ -105,9 +106,9 @@ export class GetVendorByIdHandler implements QueryHandler<GetVendorByIdQuery, an
 }
 
 @Injectable()
-export class ListVendorsHandler implements QueryHandler<ListVendorsQuery, any[]> {
+export class ListVendorsHandler implements QueryHandler<ListVendorsQuery, PrismaVendor[]> {
   constructor(private readonly prisma: PrismaService) {}
-  async execute(query: ListVendorsQuery) {
+  async execute(query: ListVendorsQuery): Promise<PrismaVendor[]> {
     return this.prisma.vendor.findMany({
       where: {
         organizationId: query.organizationId,

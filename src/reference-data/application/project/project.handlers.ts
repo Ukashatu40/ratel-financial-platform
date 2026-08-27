@@ -17,6 +17,7 @@ import {
   DeactivateProjectCommand,
   UpdateProjectCommand,
 } from './project.commands';
+import { Project as PrismaProject } from '@prisma/client';
 import { GetProjectByIdQuery, ListProjectsQuery } from './project.queries';
 
 @Injectable()
@@ -93,9 +94,9 @@ export class DeactivateProjectHandler implements CommandHandler<DeactivateProjec
 }
 
 @Injectable()
-export class GetProjectByIdHandler implements QueryHandler<GetProjectByIdQuery, any> {
+export class GetProjectByIdHandler implements QueryHandler<GetProjectByIdQuery, PrismaProject> {
   constructor(private readonly prisma: PrismaService) {}
-  async execute(query: GetProjectByIdQuery) {
+  async execute(query: GetProjectByIdQuery): Promise<PrismaProject> {
     const project = await this.prisma.project.findFirst({
       where: { id: query.projectId, organizationId: query.organizationId },
     });
@@ -105,9 +106,9 @@ export class GetProjectByIdHandler implements QueryHandler<GetProjectByIdQuery, 
 }
 
 @Injectable()
-export class ListProjectsHandler implements QueryHandler<ListProjectsQuery, any[]> {
+export class ListProjectsHandler implements QueryHandler<ListProjectsQuery, PrismaProject[]> {
   constructor(private readonly prisma: PrismaService) {}
-  async execute(query: ListProjectsQuery) {
+  async execute(query: ListProjectsQuery): Promise<PrismaProject[]> {
     return this.prisma.project.findMany({
       where: {
         organizationId: query.organizationId,
