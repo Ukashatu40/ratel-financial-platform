@@ -1338,59 +1338,68 @@ decision — if the layout later changes, this one line changes with it.
 
 ## Tooling
 
-### 46. `npm run lint` runs, and its config is now correct, but `src` is not yet clean
-**Where:** `eslint.config.mjs`; `package.json`'s `lint` script.
+### 46. ~~`npm run lint` runs, and its config is now correct, but `src` is not yet clean~~ — RESOLVED
+All 63 errors and 5 warnings closed (the count moved from the last entry's
+62 to 63 between then and this pass — one additional `any` had entered the
+codebase in the interim; not investigated further since the fix applies
+uniformly regardless of count).
 
-**CORRECTION — this entry was stale.** It previously said "`npm run lint` fails
-immediately" and "there is no ESLint configuration anywhere in the repo — no flat
-config, no legacy `.eslintrc.*`". A 13-line flat `eslint.config.mjs` was added in
-commit `b4af661` (`@eslint/js` recommended + `typescript-eslint` recommended +
-`eslint-config-prettier` last, ignoring `dist`/`coverage`/`node_modules`/
-`generated`) — exactly what the "to close" below prescribed for the config half.
-So the script runs. Leaving the entry claiming otherwise was actively misleading,
-which is the only reason it's being corrected as part of an unrelated piece.
+**Every `any` replaced with a real type, not suppressed.** The dominant
+pattern (repositories, application handlers, reporting) was casting to a
+genuine Prisma-generated type — enums (`RoleName`, `ExpenseStatus`,
+`PayrollRunStatus`, `PeriodStatus`, `ApprovalDecision`), model types
+(`Employee`, `Department`, `Vendor`, `Project`, `ExpenseCategory`,
+`NotificationLog`), or `Prisma.<Model>WhereInput` — rather than a blanket
+`as any`. A handful needed something more specific: `permission.guard.ts`
+and `prisma-effective-scope.resolver.ts` now cast role arrays to `RoleName`;
+`request-context.middleware.ts` uses a minimal structural `RequestLike`
+interface instead of importing a Fastify type this file was never confident
+matched what Nest actually passes; `problem-details.filter.ts`'s three
+`any`s were replaced with a genuine `hasMessage()` type guard rather than a
+cast, which is arguably better code than what was there, not just quieter.
 
-**What is still open** is the second half, which is the larger half:
-`npx eslint "src/**/*.ts"` currently reports **65 errors and 5 warnings** across
-`src`. Dominated by `@typescript-eslint/no-explicit-any`, plus two
-`no-useless-assignment` hits (`cash-outflow.handler.ts`,
-`aes-gcm-envelope-crypto.ts`) that are worth reading individually rather than
-silencing, and one unused `eslint-disable` directive in `tracing.ts`.
+**A real Prisma gotcha, discovered and then reused deliberately.**
+`AuditLogService`'s nullable `oldValue: Json?` column rejected a bare `null`
+at the type level — Prisma requires `Prisma.DbNull` (a genuinely absent SQL
+value) to be distinguished from `Prisma.JsonNull` (a stored JSON `null`
+token) precisely because the two are different at the database level. The
+first attempt at silencing this cast `null` through `as unknown as X`,
+which compiled but left the code claiming a type it never actually produced
+at runtime — caught and corrected before merging, not left in. The same
+gap existed a second time, independently, in `ImportController`'s
+`resolvedMapping` — both now use `Prisma.DbNull` for a genuine absence.
 
-**The config gap is now FIXED, and it was a real defect, not cosmetic.** The flat
-config set no `argsIgnorePattern`, so `@typescript-eslint/no-unused-vars` flagged
-this codebase's deliberate `_`-prefixed unused parameters — e.g.
-`requiresApproval(amountMinorUnits, _reason)` in `ExpenseAdjustmentApprovalPolicy`,
-where the prefix IS the signal that ignoring it is intentional. The config now sets
-`argsIgnorePattern`, `varsIgnorePattern` and `caughtErrorsIgnorePattern` to `^_`.
+**Two of the fixes changed real behaviour, not just satisfied the linter,
+and are recorded separately from the mechanical majority:**
+- `PayrollRun.totalGrossPay()` and `Payslip.generate()` both called
+  `Money.zero(currency as any)`, which bypasses `Money`'s own
+  `isSupportedCurrency` check entirely — an unchecked cast was silently
+  authorizing an unchecked value. Both now call `Money.of(0n, currency)`,
+  which produces the identical zero value but validates the currency code,
+  so an unsupported currency now correctly throws `InvalidCurrencyError`
+  (itself only reachable as a proper 400 since #50) instead of silently
+  succeeding.
+- Several `QueryHandler`s returning `any[]`/`any` now return the actual
+  Prisma row type they always produced. This is a type-honesty fix with a
+  known, deliberately-not-fixed-here side effect: several of these
+  (`Employee`, `NotificationLog`, and others) now visibly return
+  `organizationId` in their response type — the same echo-back pattern
+  `#22`/`#47` closed for `ColumnMappingView`/`EventDeliveryView`, not
+  addressed for these handlers in this pass since it's a response-shape
+  decision, not a lint fix. Worth its own item if closed later.
 
-Re-counted afterwards: **62 errors and 5 warnings**, down from 65 — so 3 of the
-reported errors were the codebase being penalised for following its own convention.
-The remaining 62 are real and still open, dominated by
-`@typescript-eslint/no-explicit-any`, plus two `no-useless-assignment` hits
-(`cash-outflow.handler.ts`, `aes-gcm-envelope-crypto.ts`) worth reading
-individually rather than silencing, and one unused `eslint-disable` directive in
-`tracing.ts`.
+**Verification order matters here more than usual**, since two of the
+fixes above are real behaviour changes disguised as a typing pass: full
+build, full lint, then the complete suite (unit, integration, e2e) — not
+build+lint alone, specifically because a currency-validation tightening or
+a `DbNull` change could pass a type check while silently breaking a test
+that relied on the old, looser behaviour. All green.
 
-**Why the remaining 62 still aren't fixed here:** unchanged from the original
-reasoning — a repo-wide typing sweep is a deliberate, separately reviewable piece.
-It also is not mechanical: each `any` removed is a real typing decision, and #21
-showed exactly what those hide (a return type of `any` let a labelled-statement bug
-ship an endpoint that served `[undefined, undefined, …]` for every payroll run).
-That makes the sweep valuable but not something to bury inside unrelated work.
-
-**Noted while here, not fixed:** `@eslint/js` and `typescript-eslint` are declared
-in `dependencies` rather than `devDependencies`, so they ship to production. Wrong
-section, no runtime effect; worth correcting whenever this file is next touched.
-
-**To close:** fix or explicitly disable the remaining 62, as its own piece. The two
-rules the original entry flagged as worth enabling deliberately are still worth it,
-because each would have caught a real bug here:
-`@typescript-eslint/no-unused-expressions` (exactly #21's labelled-statement bug)
-and `no-unused-vars` (the dead `const rawContent = buffer.toString('utf8')` left in
-`ImportController.create()` after #23). Note that neither is currently catching a
-*threshold* mistake like #10's — no lint rule can; that needs the unit coverage #10
-added.
+The two rules the original entry singled out as worth enabling —
+`no-unused-expressions` (which would have caught #21's actual bug) and
+`no-unused-vars` (which caught 6 real dead imports/types in this very
+pass, including one leftover from #23) — earned their keep directly during
+this sweep, not just in principle.
 
 
 ---
