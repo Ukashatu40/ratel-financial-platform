@@ -1,5 +1,5 @@
 // src/notifications/application/notification.handlers.ts
-import { Inject, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { QueryHandler } from '../../shared-kernel/cqrs/query-handler';
@@ -9,6 +9,7 @@ import { DomainError, EntityNotFoundError } from '../../shared-kernel/errors/dom
 import { NOTIFICATION_JOB, NOTIFICATION_QUEUE } from '../../jobs/queues/notification.queue';
 import { ListNotificationsQuery, GetNotificationByIdQuery } from './notification.queries';
 import { RetryNotificationCommand } from './notification.commands';
+import { NotificationLog as PrismaNotificationLog } from '@prisma/client';
 
 export class NotificationNotFailedError extends DomainError {
   readonly code = 'notification-not-failed';
@@ -19,9 +20,12 @@ export class NotificationNotFailedError extends DomainError {
 }
 
 @Injectable()
-export class ListNotificationsHandler implements QueryHandler<ListNotificationsQuery, any[]> {
+export class ListNotificationsHandler implements QueryHandler<
+  ListNotificationsQuery,
+  PrismaNotificationLog[]
+> {
   constructor(private readonly prisma: PrismaService) {}
-  async execute(query: ListNotificationsQuery) {
+  async execute(query: ListNotificationsQuery): Promise<PrismaNotificationLog[]> {
     return this.prisma.notificationLog.findMany({
       where: {
         organizationId: query.organizationId,
@@ -34,9 +38,12 @@ export class ListNotificationsHandler implements QueryHandler<ListNotificationsQ
 }
 
 @Injectable()
-export class GetNotificationByIdHandler implements QueryHandler<GetNotificationByIdQuery, any> {
+export class GetNotificationByIdHandler implements QueryHandler<
+  GetNotificationByIdQuery,
+  PrismaNotificationLog
+> {
   constructor(private readonly prisma: PrismaService) {}
-  async execute(query: GetNotificationByIdQuery) {
+  async execute(query: GetNotificationByIdQuery): Promise<PrismaNotificationLog> {
     const log = await this.prisma.notificationLog.findFirst({
       where: { id: query.notificationId, organizationId: query.organizationId },
     });

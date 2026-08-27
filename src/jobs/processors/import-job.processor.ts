@@ -3,16 +3,14 @@ import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Inject, Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
 import { PrismaService } from '../../prisma/prisma.service';
-import {
-  CsvProviderAdapter,
-  CsvParseError,
-} from '../../integration/adapters/csv/csv-provider.adapter';
+import { CsvProviderAdapter } from '../../integration/adapters/csv/csv-provider.adapter';
 import { OBJECT_STORAGE_PORT, ObjectStoragePort } from '../../storage/object-storage.port';
 import { CsvNormalizer, CsvRowValidationError } from '../../integration/normalizers/csv-normalizer';
 import { InboxService } from '../../integration/inbox/inbox.service';
 import { ImportMappingError, ImportRecordMapper } from '../../integration/acl/import-record-mapper';
 import { CreateExpenseHandler } from '../../contexts/expense/application/handlers/create-expense.handler';
 import { IMPORT_JOB_QUEUE } from '../queues/import-job.queue';
+import { Prisma } from '@prisma/client';
 
 interface ImportJobPayload {
   importJobId: string;
@@ -117,7 +115,12 @@ export class ImportJobProcessor extends WorkerHost {
             : `Unexpected error: ${(err as Error).message}`;
 
         await this.prisma.failedImportRecord.create({
-          data: { importJobId, rowNumber, rawRow: rawRow as any, errorMessage: message },
+          data: {
+            importJobId,
+            rowNumber,
+            rawRow: rawRow as unknown as Prisma.InputJsonValue,
+            errorMessage: message,
+          },
         });
         this.logger.warn(`Import job ${importJobId} row ${rowNumber} failed: ${message}`);
       }
