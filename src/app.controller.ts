@@ -1,5 +1,5 @@
 // src/app.controller.ts
-import { Controller, Get } from '@nestjs/common';
+import { Controller } from '@nestjs/common';
 
 /**
  * Minimal liveness/readiness endpoint so M0/M1 can be verified as actually

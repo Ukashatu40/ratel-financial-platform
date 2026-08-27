@@ -5,6 +5,7 @@ import { TransactionClient } from '../../../../shared-kernel/unit-of-work/unit-o
 import { FinancialPeriod } from '../../domain/aggregates/financial-period.aggregate';
 import { FinancialPeriodRepository } from '../../domain/ports/financial-period-repository.port';
 import { OPEN_STATUSES, PeriodStatusValue } from '../../domain/value-objects/period-status';
+import { PeriodStatus as PrismaPeriodStatus } from '@prisma/client';
 
 @Injectable()
 export class PrismaFinancialPeriodRepository implements FinancialPeriodRepository {
@@ -16,10 +17,13 @@ export class PrismaFinancialPeriodRepository implements FinancialPeriodRepositor
     return row ? this.toDomain(row) : null;
   }
 
-  async findCurrentOpen(organizationId: string, tx?: TransactionClient): Promise<FinancialPeriod | null> {
+  async findCurrentOpen(
+    organizationId: string,
+    tx?: TransactionClient,
+  ): Promise<FinancialPeriod | null> {
     const client = tx ?? this.prisma;
     const row = await client.financialPeriod.findFirst({
-      where: { organizationId, status: { in: OPEN_STATUSES as any } },
+      where: { organizationId, status: { in: OPEN_STATUSES as PrismaPeriodStatus[] } },
       orderBy: { startDate: 'desc' },
     });
     return row ? this.toDomain(row) : null;
@@ -50,7 +54,7 @@ export class PrismaFinancialPeriodRepository implements FinancialPeriodRepositor
         // Spread only when a filter was actually given — an `undefined` status
         // key would be fine for Prisma, but being explicit keeps "no filter"
         // visibly distinct from "filter by undefined".
-        ...(status ? { status: status as any } : {}),
+        ...(status ? { status: status as PrismaPeriodStatus } : {}),
       },
       orderBy: { startDate: 'desc' },
     });
@@ -66,13 +70,13 @@ export class PrismaFinancialPeriodRepository implements FinancialPeriodRepositor
         organizationId: props.organizationId,
         startDate: props.startDate,
         endDate: props.endDate,
-        status: props.status as any,
+        status: props.status as PrismaPeriodStatus,
         closedById: props.closedById,
         closedAt: props.closedAt,
         createdAt: props.createdAt,
       },
       update: {
-        status: props.status as any,
+        status: props.status as PrismaPeriodStatus,
         closedById: props.closedById,
         closedAt: props.closedAt,
       },
@@ -96,7 +100,7 @@ export class PrismaFinancialPeriodRepository implements FinancialPeriodRepositor
       organizationId: row.organizationId,
       startDate: row.startDate,
       endDate: row.endDate,
-      status: row.status as any,
+      status: row.status as Parameters<typeof FinancialPeriod.reconstitute>[0]['status'],
       closedById: row.closedById,
       closedAt: row.closedAt,
       createdAt: row.createdAt,

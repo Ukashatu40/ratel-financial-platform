@@ -52,11 +52,21 @@ export class Payslip {
     currency: string;
   }): Payslip {
     const allowances = input.lineItems.filter((l) => l.kind === 'allowance');
-    const deductions = input.lineItems.filter((l) => l.kind === 'deduction' || l.kind === 'loan_repayment');
+    const deductions = input.lineItems.filter(
+      (l) => l.kind === 'deduction' || l.kind === 'loan_repayment',
+    );
 
-    const grossPay = allowances.reduce((sum, item) => sum.add(item.amount), Money.zero(input.currency as any));
-    const totalDeductions = deductions.reduce((sum, item) => sum.add(item.amount), Money.zero(input.currency as any));
-    const netPay = grossPay.add(totalDeductions.negate()).add(input.taxComputation.computedTax.negate());
+    const grossPay = allowances.reduce(
+      (sum, item) => sum.add(item.amount),
+      Money.of(0n, input.currency),
+    );
+    const totalDeductions = deductions.reduce(
+      (sum, item) => sum.add(item.amount),
+      Money.of(0n, input.currency),
+    );
+    const netPay = grossPay
+      .add(totalDeductions.negate())
+      .add(input.taxComputation.computedTax.negate());
 
     if (netPay.minorUnits > grossPay.minorUnits) {
       throw new NetPayExceedsGrossPayError(input.employeeId);
@@ -78,10 +88,18 @@ export class Payslip {
     return new Payslip(props);
   }
 
-  get id(): string { return this.props.id; }
-  get employeeId(): string { return this.props.employeeId; }
-  get grossPay(): Money { return this.props.grossPay; }
-  get netPay(): Money { return this.props.netPay; }
+  get id(): string {
+    return this.props.id;
+  }
+  get employeeId(): string {
+    return this.props.employeeId;
+  }
+  get grossPay(): Money {
+    return this.props.grossPay;
+  }
+  get netPay(): Money {
+    return this.props.netPay;
+  }
 
   toProps(): Readonly<PayslipProps> {
     return { ...this.props };

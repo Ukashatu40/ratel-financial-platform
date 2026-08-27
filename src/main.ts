@@ -17,7 +17,7 @@ async function bootstrap(): Promise<void> {
     new FastifyAdapter({ logger: false }), // structured logging (Phase 4.4/Phase 9) wired properly in the observability pass — Fastify's default logger is off to avoid double-logging in the meantime
   );
 
-  await app.register(multipart as any);
+  await app.register(multipart);
 
   const config = app.get(ConfigService<EnvConfig>);
 
@@ -54,19 +54,16 @@ async function bootstrap(): Promise<void> {
     const document = SwaggerModule.createDocument(app, swaggerConfig);
     SwaggerModule.setup('api/docs', app, document);
 
-    // eslint-disable-next-line no-console
     console.log('[swagger] API docs available at /api/docs (non-production only)');
   }
 
   const port = config.get('PORT', { infer: true }) ?? 3000;
   await app.listen(port, '0.0.0.0');
 
-  // eslint-disable-next-line no-console
   console.log(`ratel-financial-platform listening on port ${port}`);
 }
 
 bootstrap().catch((err) => {
-  // eslint-disable-next-line no-console
   console.error('Fatal error during bootstrap:', err);
   process.exit(1);
 });

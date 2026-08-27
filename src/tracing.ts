@@ -35,7 +35,6 @@ const sdk = new NodeSDK({
 
 sdk.start();
 
-// eslint-disable-next-line no-console
 console.log(
   `[tracing] OpenTelemetry started — traces: ${otlpEndpoint ? `OTLP -> ${otlpEndpoint}` : 'not configured, dropped'}, metrics: http://localhost:${metricsPort}/metrics`,
 );

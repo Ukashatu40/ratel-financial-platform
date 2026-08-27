@@ -35,7 +35,7 @@ export class CashOutflowHandler implements QueryHandler<CashOutflowQuery, CashOu
         : null;
 
     type RawRow = { month: Date; total: bigint; count: bigint };
-    let rows: RawRow[] = [];
+    let rows: RawRow[];
 
     // Separate clean execution paths to prevent Prisma template nesting syntax errors
     if (departmentIds && departmentIds.length > 0) {

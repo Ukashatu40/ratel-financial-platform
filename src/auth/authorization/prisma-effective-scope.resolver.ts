@@ -5,6 +5,7 @@ import {
   EffectiveScope,
   EffectiveScopeResolver,
 } from '../../shared-kernel/auth/effective-scope-resolver.port';
+import { RoleName } from '@prisma/client';
 
 @Injectable()
 export class PrismaEffectiveScopeResolver implements EffectiveScopeResolver {
@@ -14,7 +15,7 @@ export class PrismaEffectiveScopeResolver implements EffectiveScopeResolver {
     if (roles.length === 0) return null;
 
     const grants = await this.prisma.rolePermission.findMany({
-      where: { role: { in: roles as any }, permission },
+      where: { role: { in: roles as RoleName[] }, permission },
     });
     if (grants.length === 0) return null;
 

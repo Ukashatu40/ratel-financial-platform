@@ -5,6 +5,7 @@ import { PrismaService } from '../../../prisma/prisma.service';
 import { TransactionClient } from '../../unit-of-work/unit-of-work.port';
 import { ApprovalChain, ApprovalStep } from '../approval-chain';
 import { ApprovalProgress, ApprovalRecord } from '../approval-progress';
+import { Prisma, ApprovalDecision as PrismaApprovalDecision } from '@prisma/client';
 import { ApprovalProgressRepository } from '../approval-progress-repository.port';
 
 /**
@@ -17,12 +18,17 @@ import { ApprovalProgressRepository } from '../approval-progress-repository.port
 export class PrismaApprovalProgressRepository implements ApprovalProgressRepository {
   constructor(private readonly prisma: PrismaService) {}
 
-  async initialize(itemId: string, itemType: string, chain: ApprovalChain, tx: TransactionClient): Promise<ApprovalProgress> {
+  async initialize(
+    itemId: string,
+    itemType: string,
+    chain: ApprovalChain,
+    tx: TransactionClient,
+  ): Promise<ApprovalProgress> {
     await tx.approvalProgress.create({
       data: {
         itemId,
         itemType,
-        chain: chain.toArray() as any,
+        chain: chain.toArray() as unknown as Prisma.InputJsonValue,
       },
     });
     return ApprovalProgress.start(itemId, chain);
@@ -63,7 +69,7 @@ export class PrismaApprovalProgressRepository implements ApprovalProgressReposit
         progressId: progressRow.id,
         stepOrder: r.stepOrder,
         approverId: r.approverId,
-        decision: r.decision as any,
+        decision: r.decision as PrismaApprovalDecision,
         reason: r.reason ?? null,
         decidedAt: r.decidedAt,
       })),

@@ -4,6 +4,7 @@ import { randomUUID } from 'crypto';
 import { DomainEvent } from '../events/domain-event';
 import { TransactionClient } from '../unit-of-work/unit-of-work.port';
 import { RequestContext } from '../context/request-context';
+import { Prisma } from '@prisma/client';
 
 @Injectable()
 export class OutboxService {
@@ -17,7 +18,7 @@ export class OutboxService {
         aggregateType: event.aggregateType,
         aggregateId: event.aggregateId,
         eventType: event.type,
-        payload: event.payload as any,
+        payload: event.payload as unknown as Prisma.InputJsonValue,
         correlationId: ctx?.correlationId ?? randomUUID(), // fallback for non-HTTP callers (seed, future jobs)
         requestId: ctx?.requestId,
         ipAddress: ctx?.ipAddress,

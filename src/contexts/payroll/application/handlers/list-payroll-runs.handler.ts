@@ -7,12 +7,23 @@ import {
   PayrollRunRepository,
 } from '../../domain/ports/payroll-run-repository.port';
 import { ListPayrollRunsQuery } from '../queries/list-payroll-runs.query';
+import { PayrollRunProps } from '../../domain/aggregates/payroll-run.aggregate';
+
+export interface PayrollRunSummaryView {
+  id: string;
+  status: PayrollRunProps['status'];
+  runMonth: Date;
+  payslipCount: number;
+}
 
 @Injectable()
-export class ListPayrollRunsHandler implements QueryHandler<ListPayrollRunsQuery, Page<any>> {
+export class ListPayrollRunsHandler implements QueryHandler<
+  ListPayrollRunsQuery,
+  Page<PayrollRunSummaryView>
+> {
   constructor(@Inject(PAYROLL_RUN_REPOSITORY) private readonly repo: PayrollRunRepository) {}
 
-  async execute(query: ListPayrollRunsQuery): Promise<Page<any>> {
+  async execute(query: ListPayrollRunsQuery): Promise<Page<PayrollRunSummaryView>> {
     const page = await this.repo.findMany({
       organizationId: query.organizationId,
       cursor: query.cursor ? decodeCursor(query.cursor) : undefined,
@@ -20,7 +31,7 @@ export class ListPayrollRunsHandler implements QueryHandler<ListPayrollRunsQuery
     });
 
     return {
-      data: page.data.map((run) => {
+      data: page.data.map((run): PayrollRunSummaryView => {
         const props = run.toProps();
         return {
           id: props.id,

@@ -55,7 +55,6 @@ export function validateEnv(raw: Record<string, unknown>): EnvConfig {
   const result = envSchema.safeParse(raw);
   if (!result.success) {
     // Fail fast, at boot — never start with a malformed/missing config (Phase 4.4)
-    // eslint-disable-next-line no-console
     console.error('Invalid environment configuration:', result.error.flatten().fieldErrors);
     process.exit(1);
   }

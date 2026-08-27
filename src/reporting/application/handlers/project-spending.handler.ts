@@ -6,6 +6,7 @@ import {
   EFFECTIVE_SCOPE_RESOLVER,
   EffectiveScopeResolver,
 } from '../../../shared-kernel/auth/effective-scope-resolver.port';
+import { Prisma } from '@prisma/client';
 import { ProjectSpendingQuery } from '../queries/project-spending.query';
 
 export interface ProjectSpendingRow {
@@ -33,7 +34,7 @@ export class ProjectSpendingHandler implements QueryHandler<
     );
     if (scope === null) return [];
 
-    const where: any = {
+    const where: Prisma.ExpenseReadModelWhereInput = {
       organizationId: user.organizationId,
       status: 'approved',
       expenseDate: { gte: query.from, lte: query.to },

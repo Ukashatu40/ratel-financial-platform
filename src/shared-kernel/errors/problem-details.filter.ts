@@ -12,6 +12,14 @@ interface ProblemDetails {
   correlationId?: string;
 }
 
+interface ResponseWithMessage {
+  message: unknown;
+}
+
+function hasMessage(response: unknown): response is ResponseWithMessage {
+  return typeof response === 'object' && response !== null && 'message' in response;
+}
+
 /**
  * Single global filter, per Phase 5.7 / 7.6 — every error response, whether
  * a domain error or an unexpected exception, comes out shaped as RFC 7807.
@@ -91,15 +99,11 @@ export class ProblemDetailsFilter implements ExceptionFilter {
 
     if (exception instanceof HttpException) {
       const response = exception.getResponse();
-      // class-validator's ValidationPipe puts per-field errors in
-      // response.message as a string[] — surface them instead of the
-      // generic "Bad Request Exception" wrapper message.
-      const detail =
-        typeof response === 'object' && response !== null && 'message' in response
-          ? Array.isArray((response as any).message)
-            ? (response as any).message.join('; ')
-            : String((response as any).message)
-          : exception.message;
+      const detail = hasMessage(response)
+        ? Array.isArray(response.message)
+          ? response.message.join('; ')
+          : String(response.message)
+        : exception.message;
 
       return {
         type: `${ProblemDetailsFilter.BASE_URL}/http-error`,

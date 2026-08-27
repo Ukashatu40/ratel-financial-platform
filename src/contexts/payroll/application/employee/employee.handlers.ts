@@ -17,6 +17,7 @@ import {
   LinkEmployeeToUserCommand,
   UnlinkEmployeeFromUserCommand,
 } from './employee.commands';
+import { Employee as PrismaEmployee } from '@prisma/client';
 import { GetEmployeeByIdQuery, ListEmployeesQuery } from './employee.queries';
 
 export class UserAlreadyLinkedError extends DomainError {
@@ -134,9 +135,9 @@ export class DeactivateEmployeeHandler implements CommandHandler<DeactivateEmplo
 }
 
 @Injectable()
-export class GetEmployeeByIdHandler implements QueryHandler<GetEmployeeByIdQuery, any> {
+export class GetEmployeeByIdHandler implements QueryHandler<GetEmployeeByIdQuery, PrismaEmployee> {
   constructor(private readonly prisma: PrismaService) {}
-  async execute(query: GetEmployeeByIdQuery) {
+  async execute(query: GetEmployeeByIdQuery): Promise<PrismaEmployee> {
     const employee = await this.prisma.employee.findFirst({
       where: { id: query.employeeId, organizationId: query.organizationId },
     });
@@ -146,9 +147,9 @@ export class GetEmployeeByIdHandler implements QueryHandler<GetEmployeeByIdQuery
 }
 
 @Injectable()
-export class ListEmployeesHandler implements QueryHandler<ListEmployeesQuery, any[]> {
+export class ListEmployeesHandler implements QueryHandler<ListEmployeesQuery, PrismaEmployee[]> {
   constructor(private readonly prisma: PrismaService) {}
-  async execute(query: ListEmployeesQuery) {
+  async execute(query: ListEmployeesQuery): Promise<PrismaEmployee[]> {
     return this.prisma.employee.findMany({
       where: {
         organizationId: query.organizationId,

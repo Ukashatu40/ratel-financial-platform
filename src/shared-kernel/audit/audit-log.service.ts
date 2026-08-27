@@ -2,6 +2,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { UNIT_OF_WORK, UnitOfWork } from '../unit-of-work/unit-of-work.port';
 import { computeEntryHashV2, CURRENT_HASH_VERSION, GENESIS_HASH } from './hash-chain.util';
+import { Prisma } from '@prisma/client';
 
 export interface RecordAuditEntryInput {
   organizationId: string;
@@ -75,8 +76,11 @@ export class AuditLogService {
           entityId: input.entityId,
           action: input.action,
           actorUserId: input.actorUserId,
-          oldValue: (input.oldValue ?? null) as any,
-          newValue: input.newValue as any,
+          oldValue:
+            input.oldValue === undefined
+              ? Prisma.DbNull
+              : (input.oldValue as unknown as Prisma.InputJsonValue),
+          newValue: input.newValue as unknown as Prisma.InputJsonValue,
           reason: input.reason,
           correlationId: input.correlationId,
           requestId: input.requestId,

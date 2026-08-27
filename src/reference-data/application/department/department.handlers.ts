@@ -16,6 +16,7 @@ import {
   DeactivateDepartmentCommand,
   UpdateDepartmentCommand,
 } from './department.commands';
+import { Department as PrismaDepartment } from '@prisma/client';
 import { GetDepartmentByIdQuery, ListDepartmentsQuery } from './department.queries';
 
 export class DuplicateNameError extends DomainError {
@@ -121,10 +122,13 @@ export class DeactivateDepartmentHandler implements CommandHandler<
 }
 
 @Injectable()
-export class GetDepartmentByIdHandler implements QueryHandler<GetDepartmentByIdQuery, any> {
+export class GetDepartmentByIdHandler implements QueryHandler<
+  GetDepartmentByIdQuery,
+  PrismaDepartment
+> {
   constructor(private readonly prisma: PrismaService) {}
 
-  async execute(query: GetDepartmentByIdQuery) {
+  async execute(query: GetDepartmentByIdQuery): Promise<PrismaDepartment> {
     const department = await this.prisma.department.findFirst({
       where: { id: query.departmentId, organizationId: query.organizationId },
     });
@@ -134,10 +138,13 @@ export class GetDepartmentByIdHandler implements QueryHandler<GetDepartmentByIdQ
 }
 
 @Injectable()
-export class ListDepartmentsHandler implements QueryHandler<ListDepartmentsQuery, any[]> {
+export class ListDepartmentsHandler implements QueryHandler<
+  ListDepartmentsQuery,
+  PrismaDepartment[]
+> {
   constructor(private readonly prisma: PrismaService) {}
 
-  async execute(query: ListDepartmentsQuery) {
+  async execute(query: ListDepartmentsQuery): Promise<PrismaDepartment[]> {
     return this.prisma.department.findMany({
       where: {
         organizationId: query.organizationId,

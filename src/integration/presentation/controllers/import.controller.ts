@@ -37,10 +37,8 @@ import {
 } from '../../application/column-mapping/column-mapping.commands';
 import { ListColumnMappingsQuery } from '../../application/column-mapping/column-mapping.queries';
 import { SaveColumnMappingDto } from '../dto/save-column-mapping.dto';
-import {
-  UnsupportedImportFileError,
-  validateCsvUpload,
-} from '../../domain/csv-file-validation';
+import { UnsupportedImportFileError, validateCsvUpload } from '../../domain/csv-file-validation';
+import { Prisma } from '@prisma/client';
 
 const MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024; // 5MB — generous for CSV, deliberately capped
 
@@ -102,7 +100,10 @@ export class ImportController {
         status: 'pending',
         initiatedById: user.id,
         storageKey,
-        resolvedMapping: resolvedMapping as any,
+        resolvedMapping:
+          resolvedMapping === null
+            ? Prisma.DbNull
+            : (resolvedMapping as unknown as Prisma.InputJsonValue),
       },
     });
 
@@ -137,9 +138,7 @@ export class ImportController {
   @RequirePermission('expense:create')
   @Delete('column-mappings/:id')
   async deleteMapping(@Param('id') id: string, @CurrentUser() user: UserPrincipal) {
-    await this.deleteColumnMapping.execute(
-      new DeleteColumnMappingCommand(user.organizationId, id),
-    );
+    await this.deleteColumnMapping.execute(new DeleteColumnMappingCommand(user.organizationId, id));
   }
 
   @ApiOperation({ summary: 'Check the status/progress of an import job' })

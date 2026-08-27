@@ -3,9 +3,14 @@ import { Injectable, NestMiddleware } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { RequestContext } from '../../shared-kernel/context/request-context';
 
+interface RequestLike {
+  headers: Record<string, string | string[] | undefined>;
+  socket?: { remoteAddress?: string };
+}
+
 @Injectable()
 export class RequestContextMiddleware implements NestMiddleware {
-  use(req: any, _res: any, next: () => void): void {
+  use(req: RequestLike, _res: unknown, next: () => void): void {
     const correlationId = (req.headers['x-correlation-id'] as string) || randomUUID();
     const requestId = randomUUID();
     const ipAddress: string | undefined =

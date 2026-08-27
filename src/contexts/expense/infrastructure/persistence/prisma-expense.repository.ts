@@ -5,8 +5,13 @@ import { TransactionClient } from '../../../../shared-kernel/unit-of-work/unit-o
 import { Money } from '../../../../shared-kernel/money/money.vo';
 import { Expense, ExpenseProps } from '../../domain/aggregates/expense.aggregate';
 import { ExpenseRepository } from '../../domain/ports/expense-repository.port';
-import { Cursor, Page } from '../../../../shared-kernel/pagination/cursor';
+import { Page } from '../../../../shared-kernel/pagination/cursor';
 import { ExpenseListFilter } from '../../domain/ports/expense-repository.port';
+import {
+  Prisma,
+  ExpenseStatus as PrismaExpenseStatus,
+  ExpenseSourceType as PrismaExpenseSourceType,
+} from '@prisma/client';
 
 type ExpenseRow = {
   id: string;
@@ -47,11 +52,11 @@ export class PrismaExpenseRepository implements ExpenseRepository {
   }
 
   async findMany(filter: ExpenseListFilter): Promise<Page<Expense>> {
-    const where: any = { organizationId: filter.organizationId };
+    const where: Prisma.ExpenseWhereInput = { organizationId: filter.organizationId };
 
     if (filter.departmentIds?.length) where.departmentId = { in: filter.departmentIds };
     if (filter.requesterId) where.sourceActorId = filter.requesterId;
-    if (filter.status?.length) where.status = { in: filter.status as any };
+    if (filter.status?.length) where.status = { in: filter.status as PrismaExpenseStatus[] };
 
     if (filter.cursor) {
       // Cursor pagination on (createdAt, id) — standard tie-break pattern
@@ -90,7 +95,7 @@ export class PrismaExpenseRepository implements ExpenseRepository {
       where: { id_expenseDate: { id: props.id, expenseDate: props.expenseDate } },
       create: this.toRow(props),
       update: {
-        status: props.status as any,
+        status: props.status as PrismaExpenseStatus,
         amountMinorUnits: props.amount.minorUnits,
         currency: props.amount.currencyCode,
         categoryId: props.categoryId,
@@ -125,8 +130,8 @@ export class PrismaExpenseRepository implements ExpenseRepository {
       id: props.id,
       organizationId: props.organizationId,
       expenseNumber: props.expenseNumber,
-      status: props.status as any,
-      sourceType: props.source.type as any,
+      status: props.status as PrismaExpenseStatus,
+      sourceType: props.source.type as PrismaExpenseSourceType,
       sourceActorId: props.source.actorId,
       sourceImportJobId: props.source.importJobId ?? null,
       amountMinorUnits: props.amount.minorUnits,
@@ -153,9 +158,9 @@ export class PrismaExpenseRepository implements ExpenseRepository {
       id: row.id,
       organizationId: row.organizationId,
       expenseNumber: row.expenseNumber,
-      status: row.status as any,
+      status: row.status as ExpenseProps['status'],
       source: {
-        type: row.sourceType as any,
+        type: row.sourceType as ExpenseProps['source']['type'],
         actorId: row.sourceActorId,
         importJobId: row.sourceImportJobId ?? undefined,
       },

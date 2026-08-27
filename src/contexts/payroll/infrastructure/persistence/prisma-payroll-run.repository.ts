@@ -13,8 +13,6 @@ import {
   PayrollRunListFilter,
   PayrollRunRepository,
 } from '../../domain/ports/payroll-run-repository.port';
-import { SalaryLineItem } from '../../domain/value-objects/salary-line-item';
-import { TaxComputation } from '../../domain/value-objects/tax-computation';
 import {
   deserializeLineItems,
   serializeLineItems,
@@ -26,17 +24,12 @@ import {
   SerializedTaxComputation,
 } from '../../domain/value-objects/tax-computation';
 import { Page } from '../../../../shared-kernel/pagination/cursor';
+import { Prisma, PayrollRunStatus as PrismaPayrollRunStatus } from '@prisma/client';
 
 interface SerializedPayslipDetail {
   salaryStructureSnapshot: Record<string, unknown>; // already JSON-safe (toSnapshot() serializes internally now)
   lineItems: SerializedSalaryLineItem[];
   taxComputation: SerializedTaxComputation;
-}
-
-interface EncryptedPayslipDetail {
-  salaryStructureSnapshot: Record<string, unknown>;
-  lineItems: SalaryLineItem[];
-  taxComputation: TaxComputation;
 }
 
 @Injectable()
@@ -70,7 +63,7 @@ export class PrismaPayrollRunRepository implements PayrollRunRepository {
   }
 
   async findMany(filter: PayrollRunListFilter): Promise<Page<PayrollRun>> {
-    const where: any = { organizationId: filter.organizationId };
+    const where: Prisma.PayrollRunWhereInput = { organizationId: filter.organizationId };
     if (filter.cursor) {
       where.OR = [
         { createdAt: { lt: new Date(filter.cursor.createdAt) } },
@@ -110,7 +103,7 @@ export class PrismaPayrollRunRepository implements PayrollRunRepository {
         id: props.id,
         organizationId: props.organizationId,
         periodId: props.periodId,
-        status: props.status as any,
+        status: props.status as PrismaPayrollRunStatus,
         runMonth: props.runMonth,
         createdById: props.createdById,
         approvedById: props.approvedById,
@@ -118,7 +111,7 @@ export class PrismaPayrollRunRepository implements PayrollRunRepository {
         createdAt: props.createdAt,
       },
       update: {
-        status: props.status as any,
+        status: props.status as PrismaPayrollRunStatus,
         approvedById: props.approvedById,
         approvedAt: props.approvedAt,
       },
@@ -187,7 +180,7 @@ export class PrismaPayrollRunRepository implements PayrollRunRepository {
       id: row.id,
       organizationId: row.organizationId,
       periodId: row.periodId,
-      status: row.status as any,
+      status: row.status as PayrollRunProps['status'],
       runMonth: row.runMonth,
       createdById: row.createdById,
       approvedById: row.approvedById,
