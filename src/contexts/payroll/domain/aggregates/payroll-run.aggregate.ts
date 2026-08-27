@@ -2,7 +2,10 @@
 import { randomUUID } from 'crypto';
 import { AggregateRoot } from '../../../../shared-kernel/events/domain-event';
 import { Money } from '../../../../shared-kernel/money/money.vo';
-import { InvalidStateTransitionError, DomainError } from '../../../../shared-kernel/errors/domain-error';
+import {
+  InvalidStateTransitionError,
+  DomainError,
+} from '../../../../shared-kernel/errors/domain-error';
 import { PayrollRunStatusValue, MUTABLE_RUN_STATUSES } from '../value-objects/payroll-run-status';
 import { Payslip } from '../entities/payslip.entity';
 import {
@@ -109,7 +112,12 @@ export class PayrollRun extends AggregateRoot {
     }
     this.payslips.push(payslip);
     this.recordEvent(
-      payslipGenerated(this.props.id, this.props.organizationId, payslip.employeeId, payslip.netPay.minorUnits),
+      payslipGenerated(
+        this.props.id,
+        this.props.organizationId,
+        payslip.employeeId,
+        payslip.netPay.minorUnits,
+      ),
     );
   }
 
@@ -137,7 +145,9 @@ export class PayrollRun extends AggregateRoot {
   reject(approverId: string, reason: string): void {
     this.assertTransition('draft', ['pending_approval']); // rejected runs go back to draft for correction, not a dead-end 'rejected' state — payroll admin fixes and resubmits
     this.props.status = 'draft';
-    this.recordEvent(payrollRunRejected(this.props.id, this.props.organizationId, approverId, reason));
+    this.recordEvent(
+      payrollRunRejected(this.props.id, this.props.organizationId, approverId, reason),
+    );
   }
 
   startProcessing(): void {
@@ -158,7 +168,7 @@ export class PayrollRun extends AggregateRoot {
   }
 
   totalGrossPay(currency: string): Money {
-    return this.payslips.reduce((sum, p) => sum.add(p.grossPay), Money.zero(currency as any));
+    return this.payslips.reduce((sum, p) => sum.add(p.grossPay), Money.of(0n, currency));
   }
 
   private assertTransition(to: PayrollRunStatusValue, allowedFrom: PayrollRunStatusValue[]): void {
@@ -167,12 +177,24 @@ export class PayrollRun extends AggregateRoot {
     }
   }
 
-  get id(): string { return this.props.id; }
-  get organizationId(): string { return this.props.organizationId; }
-  get periodId(): string { return this.props.periodId; }
-  get status(): PayrollRunStatusValue { return this.props.status; }
-  get createdById(): string { return this.props.createdById; }
-  get getPayslips(): readonly Payslip[] { return this.payslips; }
+  get id(): string {
+    return this.props.id;
+  }
+  get organizationId(): string {
+    return this.props.organizationId;
+  }
+  get periodId(): string {
+    return this.props.periodId;
+  }
+  get status(): PayrollRunStatusValue {
+    return this.props.status;
+  }
+  get createdById(): string {
+    return this.props.createdById;
+  }
+  get getPayslips(): readonly Payslip[] {
+    return this.payslips;
+  }
 
   toProps(): Readonly<PayrollRunProps> {
     return { ...this.props };
