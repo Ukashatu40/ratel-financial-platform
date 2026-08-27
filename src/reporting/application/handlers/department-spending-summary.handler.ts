@@ -6,6 +6,7 @@ import {
   EFFECTIVE_SCOPE_RESOLVER,
   EffectiveScopeResolver,
 } from '../../../shared-kernel/auth/effective-scope-resolver.port';
+import { Prisma } from '@prisma/client';
 import { DepartmentSpendingSummaryQuery } from '../queries/department-spending-summary.query';
 
 export interface DepartmentSpendingRow {
@@ -31,7 +32,7 @@ export class DepartmentSpendingSummaryHandler implements QueryHandler<
     const scope = await this.scopeResolver.resolveWidestScope(roles, 'report:view');
     if (scope === null) return []; // fail closed — same pattern as ListExpensesHandler
 
-    const where: any = {
+    const where: Prisma.ExpenseReadModelWhereInput = {
       organizationId: user.organizationId,
       status: 'approved',
       expenseDate: { gte: query.from, lte: query.to },
