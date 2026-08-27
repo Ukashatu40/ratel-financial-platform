@@ -64,7 +64,6 @@ export function packEnvelope(e: EncryptedEnvelope): Buffer {
   e.dekAuthTag.copy(header, offset);
   offset += 16;
   header.writeUInt32BE(e.wrappedDek.length, offset);
-  offset += 4;
 
   return Buffer.concat([header, e.wrappedDek, e.ciphertextIv, e.ciphertextAuthTag, e.ciphertext]);
 }
