@@ -13,6 +13,7 @@ import {
   payrollRunCancelled,
   payrollRunCreated,
   payrollRunProcessed,
+  payrollRunProcessingStarted,
   payrollRunRejected,
   payrollRunSubmittedForApproval,
   payslipGenerated,
@@ -93,8 +94,17 @@ export class PayrollRun extends AggregateRoot {
     return run;
   }
 
+  /**
+   * TECH_DEBT #52 (3 of 3) — payslips is a sibling array, not part of props,
+   * so the generic props diff in AggregateRoot could never see it change.
+   * Including a derived payslipCount here means addPayslip()'s existing
+   * recordEvent(payslipGenerated(...)) call now automatically gets a
+   * `changes: { payslipCount: { from, to } }` payload — no other method
+   * needed to change, since payslipCount is identical before/after every
+   * other mutation and so never appears in their diffs.
+   */
   protected snapshotState(): Record<string, unknown> {
-    return this.toProps();
+    return { ...this.toProps(), payslipCount: this.payslips.length };
   }
 
   /**
@@ -150,9 +160,16 @@ export class PayrollRun extends AggregateRoot {
     );
   }
 
+  /**
+   * TECH_DEBT #52 (2 of 3) — RESOLVED. Previously mutated status with no
+   * recordEvent call at all, unlike complete() immediately below, so the
+   * trail jumped straight from 'approved' to 'completed'. System-triggered
+   * (no actor parameter, by design — confirmed this is not a human action).
+   */
   startProcessing(): void {
     this.assertTransition('processing', ['approved']);
     this.props.status = 'processing';
+    this.recordEvent(payrollRunProcessingStarted(this.props.id, this.props.organizationId));
   }
 
   complete(): void {

@@ -71,6 +71,23 @@ export function payrollRunRejected(
   };
 }
 
+/**
+ * TECH_DEBT #52 (2 of 3) — the transition into 'processing' was previously
+ * invisible to the audit trail: PayrollRun.startProcessing() mutated status
+ * with no recordEvent call, so the history jumped straight from 'approved'
+ * to 'completed'. Deliberately no actor parameter — this transition is
+ * system-triggered, unlike approve()/reject()/cancel(), which all take one.
+ */
+export function payrollRunProcessingStarted(runId: string, organizationId: string): DomainEvent {
+  return {
+    type: 'PayrollRunProcessingStarted',
+    aggregateType: AGGREGATE_TYPE,
+    aggregateId: runId,
+    occurredAt: new Date(),
+    payload: { organizationId },
+  };
+}
+
 export function payrollRunProcessed(runId: string, organizationId: string): DomainEvent {
   return {
     type: 'PayrollRunProcessed',
