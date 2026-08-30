@@ -1,5 +1,4 @@
 // src/shared-kernel/events/domain-event.ts
-// src/shared-kernel/events/domain-event.ts
 import { canonicalStringify, JsonValue, toJsonSafe } from '../serialization/canonical-json';
 
 export interface DomainEvent {

@@ -3,7 +3,11 @@ import { DomainEvent } from '../../../../shared-kernel/events/domain-event';
 
 const AGGREGATE_TYPE = 'PayrollRun';
 
-export function payrollRunCreated(runId: string, organizationId: string, runMonth: Date): DomainEvent {
+export function payrollRunCreated(
+  runId: string,
+  organizationId: string,
+  runMonth: Date,
+): DomainEvent {
   return {
     type: 'PayrollRunCreated',
     aggregateType: AGGREGATE_TYPE,
@@ -13,7 +17,12 @@ export function payrollRunCreated(runId: string, organizationId: string, runMont
   };
 }
 
-export function payslipGenerated(runId: string, organizationId: string, employeeId: string, netPayMinorUnits: bigint): DomainEvent {
+export function payslipGenerated(
+  runId: string,
+  organizationId: string,
+  employeeId: string,
+  netPayMinorUnits: bigint,
+): DomainEvent {
   return {
     type: 'PayslipGenerated',
     aggregateType: AGGREGATE_TYPE,
@@ -33,7 +42,11 @@ export function payrollRunSubmittedForApproval(runId: string, organizationId: st
   };
 }
 
-export function payrollRunApproved(runId: string, organizationId: string, approverId: string): DomainEvent {
+export function payrollRunApproved(
+  runId: string,
+  organizationId: string,
+  approverId: string,
+): DomainEvent {
   return {
     type: 'PayrollRunApproved',
     aggregateType: AGGREGATE_TYPE,
@@ -43,7 +56,12 @@ export function payrollRunApproved(runId: string, organizationId: string, approv
   };
 }
 
-export function payrollRunRejected(runId: string, organizationId: string, approverId: string, reason: string): DomainEvent {
+export function payrollRunRejected(
+  runId: string,
+  organizationId: string,
+  approverId: string,
+  reason: string,
+): DomainEvent {
   return {
     type: 'PayrollRunRejected',
     aggregateType: AGGREGATE_TYPE,
@@ -63,7 +81,11 @@ export function payrollRunProcessed(runId: string, organizationId: string): Doma
   };
 }
 
-export function payrollRunCancelled(runId: string, organizationId: string, actorId: string): DomainEvent {
+export function payrollRunCancelled(
+  runId: string,
+  organizationId: string,
+  actorId: string,
+): DomainEvent {
   return {
     type: 'PayrollRunCancelled',
     aggregateType: AGGREGATE_TYPE,

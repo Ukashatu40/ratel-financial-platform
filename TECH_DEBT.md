@@ -232,49 +232,58 @@ rather than a bug.
 certainly yes, given what it holds), add a `PayrollRunProcessingStarted` event, and
 consider including `payslipCount` in `PayrollRun.snapshotState()`.
 
-### 53. No audit chain verifier exists — the tamper-detection guarantee is unimplemented
-**Where:** `src/shared-kernel/audit/hash-chain.util.ts`
-**What:** the comment on `computeEntryHash` states that tampering is "detectable by
-recomputing the chain". **Nothing recomputes it.** `computeEntryHash`/`V2` have
-exactly one caller — `AuditLogService.record()` — and the existing tests check only
-*linkage* (each row's `prevHash` equals the prior row's `entryHash`), never that a
-row's hash matches its own content. A row could be edited and its `entryHash`
-recomputed by an attacker, or edited without touching the hash, and no code path in
-this system would notice.
+### 53. ~~No audit chain verifier exists — the tamper-detection guarantee is unimplemented~~ — RESOLVED
+`ChainVerifierService` (`src/audit-log/application/chain-verifier.service.ts`)
+walks a single organization's chain in `createdAt` order and recomputes each
+row's hash via `computeEntryHash` (v1) or `computeEntryHashV2` (v2), chosen
+per-row by `hashVersion`. Checks LINKAGE (`prevHash` matches the prior row's
+actual `entryHash`) and CONTENT (recomputed hash matches stored `entryHash`)
+as two independent checks, deliberately: editing a row and recomputing its
+OWN hash to match would still break the NEXT row's linkage to it, which only
+the linkage check catches.
 
-Linkage checks are not worthless — they catch a row deleted or reordered mid-chain —
-but they are strictly weaker than what the comment promises, and the promise is the
-kind of thing an auditor would rely on.
+`GET /audit-entries/verify` added to the existing `AuditLogController`,
+behind the already-seeded `audit:view` permission (granted only to
+`auditor` in the role-permissions matrix) — no re-seed required.
 
-**Why now:** #8 made this tractable. `hash_version` exists, so a verifier can pick
-`computeEntryHash` for v1 rows and `computeEntryHashV2` for v2 rows instead of
-reporting every historical row as tampered. That was the blocking problem.
-**To close:** a `ChainVerifierService` that walks a single organization's chain in
-`createdAt` order, recomputes each row's hash under its own `hash_version`, and
-reports the first mismatch with its row id — plus `GET /audit-entries/verify` behind
-`audit:view`. Note the honest limit it will still have, and say so in its response:
-verification proves entries were not **altered**; it cannot prove none were
-**missing**, because a chain with an entry removed and subsequent hashes recomputed
-is still internally consistent. That is the same gap #47 records for a
-permanently-failed `AuditSubscriber` delivery.
+The response states its own honest limit explicitly, not only in a code
+comment (`#26`/`#29`'s pattern): proves entries were not **altered**; cannot
+prove none are **missing** — a chain with a row deleted and every subsequent
+hash recomputed to match would still pass.
 
-### 54. `jsonb` numeric normalization is an unhandled residual risk in hash v2
-**Where:** `src/shared-kernel/serialization/canonical-json.ts`
-**What:** `canonicalStringify` handles jsonb's key reordering, which is the failure
-mode that would have broken hash v2 immediately. jsonb performs two other
-normalizations it does **not** handle: numbers are canonicalized (`1.0` stored and
-returned as `1`, `1e2` as `100`) and duplicate keys are dropped. If an audit payload
-ever contains a float whose textual form changes on round-trip, the recomputed hash
-will not match and the row will look tampered.
-**Why acceptable now:** audit payloads are event payloads, which carry strings,
-booleans, null and small integers. `Money` serializes `minorUnits` as a **string**
-precisely so bigint amounts never become floats (convention #1), so the most
-likely source of a problematic number is already excluded by design.
-**To close:** either normalize numbers to a canonical decimal string inside
-`toJsonSafe`, or — better — have the future verifier (#53) hash the **raw jsonb text**
-returned by Postgres (`SELECT new_value::text`) rather than a re-serialized JS object,
-which sidesteps every normalization question at once. Worth deciding when #53 is
-built, since that is the only consumer that would care.
+Also decided `#54` as part of this build — see that entry.
+
+Covered by 8 unit tests (valid v1/v2/mixed chains, content tampering,
+linkage tampering, unrecognized `hashVersion`, empty chain), 3
+integration tests against real Postgres, including two organizations
+verifying independently (`#7b`'s guarantee, exercised by this verifier for
+the first time) and a genuine `jsonb` round-trip with intentionally
+non-canonical key ordering in the payload, and 3 e2e tests
+(`test/e2e/audit-log-verify.e2e.spec.ts`) — the `audit:view` permission
+boundary (403 with a specific message, not the generic one), a real chain
+produced through ordinary application use (create → submit → approve),
+and direct-DB tampering bypassing `AuditLogService` entirely, all against
+a real HTTP server. All three layers confirmed green.
+
+### 54. `jsonb` numeric normalization in hash v2 — DECIDED, not eliminated
+**Resolved by decision, not by code change**, as part of building `#53`.
+The verifier reuses `computeEntryHash`/`computeEntryHashV2` directly against
+rows read back through Prisma, rather than hashing raw `jsonb::text` read
+straight from Postgres. Both the write path (`AuditLogService`) and the
+verify path now go through the identical `canonicalStringify`-based
+functions, so they solve `jsonb`'s key-reordering problem identically by
+construction — there was no need for a second, more complex hashing
+strategy just to sidestep a problem the existing functions already solve.
+
+The numeric-normalization risk this item names is **not eliminated** — a
+float whose textual form changed on a `jsonb` round-trip would still break
+verification. Accepted rather than engineered around further: audit
+payloads carry strings/booleans/null, and `Money` serializes `minorUnits` as
+a string specifically so bigint amounts never become floats (convention #1)
+— the actual realistic source of a problematic number is already excluded
+by design elsewhere in the system.
+**To close further:** only worth revisiting if a payload ever legitimately
+needs to carry a genuine floating-point value.
 
 ### 9. ~~Failed event delivery to one subscriber is only logged, not retried~~ — RESOLVED
 **Why this mattered more than the original wording suggested:** `AuditSubscriber`
