@@ -6,11 +6,12 @@ import { PermissionGuard } from '../../auth/authorization/permission.guard';
 import { RequirePermission } from '../../auth/authorization/permission.decorator';
 import { CurrentUser } from '../../auth/authentication/current-user.decorator';
 import { UserPrincipal } from '../../shared-kernel/auth/user-principal';
-import {
-  AuditEntryView,
-  ListAuditEntriesHandler,
-} from '../application/list-audit-entries.handler';
+import { AuditEntryView, ListAuditEntriesHandler } from '../application/list-audit-entries.handler';
 import { ListAuditEntriesQuery } from '../application/list-audit-entries.query';
+import {
+  ChainVerificationResult,
+  ChainVerifierService,
+} from '../application/chain-verifier.service';
 import { ListAuditEntriesDto } from './dto/list-audit-entries.dto';
 
 const DEFAULT_LIMIT = 100;
@@ -33,7 +34,10 @@ const DEFAULT_LIMIT = 100;
 @Controller({ path: 'audit-entries', version: '1' })
 @UseGuards(JwtAuthGuard, PermissionGuard)
 export class AuditLogController {
-  constructor(private readonly listAuditEntries: ListAuditEntriesHandler) {}
+  constructor(
+    private readonly listAuditEntries: ListAuditEntriesHandler,
+    private readonly chainVerifier: ChainVerifierService,
+  ) {}
 
   @ApiOperation({
     summary: 'List audit log entries for the caller organization, newest first',
@@ -68,5 +72,19 @@ export class AuditLogController {
         dto.limit ?? DEFAULT_LIMIT,
       ),
     );
+  }
+
+  @ApiOperation({
+    summary: 'Verify the audit hash chain for the caller organization',
+    description:
+      "Recomputes every entry's hash from its own stored content and confirms " +
+      'each row correctly links to the one before it. Proves entries were not ' +
+      'altered after being written — does NOT prove none are missing; see ' +
+      '`caveat` in the response.',
+  })
+  @RequirePermission('audit:view')
+  @Get('verify')
+  async verify(@CurrentUser() user: UserPrincipal): Promise<ChainVerificationResult> {
+    return this.chainVerifier.verify(user.organizationId);
   }
 }

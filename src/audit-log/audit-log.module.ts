@@ -2,6 +2,7 @@
 import { Module } from '@nestjs/common';
 import { AuditLogController } from './presentation/audit-log.controller';
 import { ListAuditEntriesHandler } from './application/list-audit-entries.handler';
+import { ChainVerifierService } from './application/chain-verifier.service';
 
 /**
  * A top-level supporting module beside `EventDeliveriesModule`, NOT a bounded context
@@ -17,6 +18,6 @@ import { ListAuditEntriesHandler } from './application/list-audit-entries.handle
  */
 @Module({
   controllers: [AuditLogController],
-  providers: [ListAuditEntriesHandler],
+  providers: [ListAuditEntriesHandler, ChainVerifierService],
 })
 export class AuditLogModule {}
