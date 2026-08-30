@@ -3,6 +3,10 @@ import { randomUUID } from 'crypto';
 import { AggregateRoot } from '../../../../shared-kernel/events/domain-event';
 import { SalaryLineItem } from '../value-objects/salary-line-item';
 import { serializeLineItems } from '../value-objects/salary-line-item';
+import {
+  salaryStructureCreated,
+  salaryStructureVersionCreated,
+} from '../events/salary-structure.events';
 
 export interface SalaryStructureProps {
   id: string;
@@ -26,6 +30,18 @@ export class SalaryStructure extends AggregateRoot {
    * makes Payslip's snapshot-at-generation-time approach safe: the
    * structure a payslip captured months ago is provably the one that was
    * actually in effect then, not something reachable by later edits.
+   *
+   * NOTE (TECH_DEBT #52 investigation): this docstring's "closes the
+   * previous one's effectiveTo" is not something this method does itself —
+   * confirmed by reading the code below. Whether that closing mutation
+   * happens elsewhere (a command handler calling something on `previous`
+   * separately) or does not exist yet at all is UNCONFIRMED as of this
+   * change. Deliberately not invented here — if it turns out to exist as
+   * an in-place mutation on an already-reconstitute()'d instance, it needs
+   * its own event (an in-place effectiveTo change IS something the generic
+   * props diff could pick up cleanly, unlike the cross-instance comparison
+   * below). If it turns out not to exist, that is a real gap worth its own
+   * TECH_DEBT entry, not something to paper over here.
    */
   static createInitialVersion(input: {
     organizationId: string;
@@ -33,7 +49,7 @@ export class SalaryStructure extends AggregateRoot {
     effectiveFrom: Date;
     baseSalaryLineItems: SalaryLineItem[];
   }): SalaryStructure {
-    return new SalaryStructure({
+    const structure = new SalaryStructure({
       id: randomUUID(),
       organizationId: input.organizationId,
       employeeId: input.employeeId,
@@ -43,6 +59,21 @@ export class SalaryStructure extends AggregateRoot {
       baseSalaryLineItems: input.baseSalaryLineItems,
       createdAt: new Date(),
     });
+
+    // TECH_DEBT #52 (1 of 3) — RESOLVED. Previously recorded zero events at
+    // all. No baseline exists for a freshly-constructed instance (only
+    // reconstitute() calls captureBaseline), so this carries no `changes` —
+    // consistent with every other aggregate's create().
+    structure.recordEvent(
+      salaryStructureCreated(
+        structure.props.id,
+        structure.props.organizationId,
+        structure.props.employeeId,
+        structure.props.version,
+        structure.props.effectiveFrom,
+      ),
+    );
+    return structure;
   }
 
   static createNextVersion(
@@ -52,7 +83,7 @@ export class SalaryStructure extends AggregateRoot {
       baseSalaryLineItems: SalaryLineItem[];
     },
   ): SalaryStructure {
-    return new SalaryStructure({
+    const structure = new SalaryStructure({
       id: randomUUID(),
       organizationId: previous.props.organizationId,
       employeeId: previous.props.employeeId,
@@ -62,6 +93,26 @@ export class SalaryStructure extends AggregateRoot {
       baseSalaryLineItems: input.baseSalaryLineItems,
       createdAt: new Date(),
     });
+
+    // TECH_DEBT #52 (1 of 3) — RESOLVED. AggregateRoot's generic props diff
+    // (TECH_DEBT #8) cannot apply here: it only ever compares one instance
+    // against its own earlier baseline, and this method constructs a brand
+    // new instance rather than mutating `previous`. previousVersionId/
+    // previousVersion are therefore carried explicitly in the payload —
+    // metadata to trace what was superseded, deliberately NOT the full
+    // baseSalaryLineItems arrays on both sides.
+    structure.recordEvent(
+      salaryStructureVersionCreated(
+        structure.props.id,
+        structure.props.organizationId,
+        structure.props.employeeId,
+        structure.props.version,
+        structure.props.effectiveFrom,
+        previous.props.id,
+        previous.props.version,
+      ),
+    );
+    return structure;
   }
 
   static reconstitute(props: SalaryStructureProps): SalaryStructure {
