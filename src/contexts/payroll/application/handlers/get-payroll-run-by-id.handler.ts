@@ -31,9 +31,10 @@ export interface PayrollRunDetailView {
 }
 
 @Injectable()
-export class GetPayrollRunByIdHandler
-  implements QueryHandler<GetPayrollRunByIdQuery, PayrollRunDetailView>
-{
+export class GetPayrollRunByIdHandler implements QueryHandler<
+  GetPayrollRunByIdQuery,
+  PayrollRunDetailView
+> {
   constructor(@Inject(PAYROLL_RUN_REPOSITORY) private readonly repo: PayrollRunRepository) {}
 
   async execute(query: GetPayrollRunByIdQuery): Promise<PayrollRunDetailView> {

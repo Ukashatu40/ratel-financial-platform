@@ -4,7 +4,10 @@ import { CommandHandler } from '../../../../shared-kernel/cqrs/command-handler';
 import { UNIT_OF_WORK, UnitOfWork } from '../../../../shared-kernel/unit-of-work/unit-of-work.port';
 import { OutboxService } from '../../../../shared-kernel/outbox/outbox.service';
 import { EntityNotFoundError } from '../../../../shared-kernel/errors/domain-error';
-import { PAYROLL_RUN_REPOSITORY, PayrollRunRepository } from '../../domain/ports/payroll-run-repository.port';
+import {
+  PAYROLL_RUN_REPOSITORY,
+  PayrollRunRepository,
+} from '../../domain/ports/payroll-run-repository.port';
 import { CancelPayrollRunCommand } from '../commands/cancel-payroll-run.command';
 
 @Injectable()

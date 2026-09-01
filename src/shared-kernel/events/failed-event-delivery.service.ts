@@ -162,7 +162,7 @@ export class FailedEventDeliveryService {
     this.logger.error(
       `Event delivery PERMANENTLY FAILED, no more retries: subscriber "${row.subscriberName}" ` +
         `never processed ${row.eventType} (outbox event ${row.outboxEventId}). ` +
-        'This event is now missing from that subscriber\'s downstream state.',
+        "This event is now missing from that subscriber's downstream state.",
     );
   }
 }
