@@ -76,6 +76,20 @@ export class SalaryStructure extends AggregateRoot {
     return structure;
   }
 
+  /**
+   * Creating a new version does NOT mutate any prior version — it is
+   * INTENDED to close the previous one's effectiveTo and insert a new row,
+   * which is what would make Payslip's snapshot-at-generation-time approach
+   * safe: the structure a payslip captured months ago would be provably the
+   * one actually in effect then, not something reachable by later edits.
+   *
+   * NOT YET WIRED (TECH_DEBT #55): no command handler calls this method —
+   * confirmed by grep against src/contexts/payroll/application/handlers,
+   * zero matches. So today there is no way to reach this method through the
+   * application at all, and the effectiveTo-closing this docstring describes
+   * does not happen anywhere, because nothing happens at all. Fixing that is
+   * a new handler, not a #52 diff-visibility fix — out of scope here.
+   */
   static createNextVersion(
     previous: SalaryStructure,
     input: {
