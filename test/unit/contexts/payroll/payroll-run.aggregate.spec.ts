@@ -4,12 +4,14 @@ import {
   EmptyPayrollRunError,
   PayrollRun,
   PayrollRunNotMutableError,
+  PayrollRunProps,
 } from '../../../../src/contexts/payroll/domain/aggregates/payroll-run.aggregate';
 import { InvalidStateTransitionError } from '../../../../src/shared-kernel/errors/domain-error';
 import { Payslip } from '../../../../src/contexts/payroll/domain/entities/payslip.entity';
 import { Money } from '../../../../src/shared-kernel/money/money.vo';
 import { noOpTaxComputation } from '../../../../src/contexts/payroll/domain/value-objects/tax-computation';
 import { describe, expect, it } from '@jest/globals';
+import { payrollRunProcessingStarted } from '../../../../src/contexts/payroll/domain/events/payroll-run.events';
 
 function buildDraftRun() {
   return PayrollRun.create({
@@ -18,6 +20,24 @@ function buildDraftRun() {
     runMonth: new Date('2026-08-01'),
     createdById: 'payroll-admin-1',
   });
+}
+
+// Only reconstitute() calls captureBaseline() — create() deliberately does
+// not (AggregateRoot's own doc comment). So testing the generic props diff
+// (TECH_DEBT #8/#52) genuinely requires going through this, not create().
+function buildRunProps(overrides: Partial<PayrollRunProps> = {}): PayrollRunProps {
+  return {
+    id: 'run-1',
+    organizationId: 'org-1',
+    periodId: 'period-1',
+    status: 'draft',
+    runMonth: new Date('2026-08-01'),
+    createdById: 'payroll-admin-1',
+    approvedById: null,
+    approvedAt: null,
+    createdAt: new Date('2026-08-01'),
+    ...overrides,
+  };
 }
 
 function buildPayslip(employeeId: string, grossMinorUnits = 400000n) {
@@ -142,6 +162,75 @@ describe('PayrollRun aggregate', () => {
       run.addPayslip(buildPayslip('emp-1'));
       run.submitForApproval();
       expect(() => run.startProcessing()).toThrow(InvalidStateTransitionError);
+    });
+  });
+
+  describe('TECH_DEBT #52', () => {
+    it('startProcessing() records PayrollRunProcessingStarted — previously recorded no event at all', () => {
+      const run = buildDraftRun();
+      run.addPayslip(buildPayslip('emp-1'));
+      run.submitForApproval();
+      run.approve('finance-director-1');
+      run.pullDomainEvents(); // clear everything before the transition under test
+
+      run.startProcessing();
+
+      const events = run.pullDomainEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].type).toBe('PayrollRunProcessingStarted');
+    });
+
+    describe('generic diff visibility (via reconstitute(), which is what actually enables it)', () => {
+      it('diffs status from approved to processing', () => {
+        const run = PayrollRun.reconstitute(buildRunProps({ status: 'approved' }), []);
+
+        run.startProcessing();
+
+        const [event] = run.pullDomainEvents();
+        expect(event.payload.changes).toEqual({
+          status: { from: 'approved', to: 'processing' },
+        });
+      });
+
+      it('includes payslipCount in the diff when a payslip is added to a reconstituted run', () => {
+        const run = PayrollRun.reconstitute(buildRunProps({ status: 'draft' }), [
+          buildPayslip('emp-1'),
+        ]);
+
+        run.addPayslip(buildPayslip('emp-2'));
+
+        const [event] = run.pullDomainEvents();
+        expect(event.payload.changes).toMatchObject({
+          payslipCount: { from: 1, to: 2 },
+        });
+      });
+
+      it('does not include payslipCount in the diff for a transition that does not touch payslips', () => {
+        const run = PayrollRun.reconstitute(buildRunProps({ status: 'approved' }), [
+          buildPayslip('emp-1'),
+          buildPayslip('emp-2'),
+        ]);
+
+        run.startProcessing();
+
+        const [event] = run.pullDomainEvents();
+        expect(event.payload.changes).not.toHaveProperty('payslipCount');
+      });
+
+      it("a freshly create()'d run's own creation event carries no changes key (create() never calls captureBaseline)", () => {
+        const run = buildDraftRun();
+
+        const [event] = run.pullDomainEvents();
+        expect(event.payload.changes).toBeUndefined();
+      });
+    });
+
+    it('payrollRunProcessingStarted() builds the correct event shape with no actor field', () => {
+      const event = payrollRunProcessingStarted('run-1', 'org-1');
+
+      expect(event.aggregateType).toBe('PayrollRun');
+      expect(event.aggregateId).toBe('run-1');
+      expect(event.payload).toEqual({ organizationId: 'org-1' });
     });
   });
 

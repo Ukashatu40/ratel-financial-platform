@@ -18,6 +18,20 @@ describe('SalaryStructure aggregate', () => {
       expect(structure.toProps().version).toBe(1);
       expect(structure.toProps().effectiveTo).toBeNull();
     });
+
+    it('records a SalaryStructureCreated event — previously recorded ZERO events at all (TECH_DEBT #52)', () => {
+      const structure = SalaryStructure.createInitialVersion({
+        organizationId: 'org-1',
+        employeeId: 'emp-1',
+        effectiveFrom: new Date('2026-01-01'),
+        baseSalaryLineItems: [],
+      });
+
+      const events = structure.pullDomainEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].type).toBe('SalaryStructureCreated');
+      expect(events[0].aggregateId).toBe(structure.id);
+    });
   });
 
   describe('createNextVersion()', () => {
@@ -73,6 +87,59 @@ describe('SalaryStructure aggregate', () => {
 
       expect(v2.toProps().organizationId).toBe('org-1');
       expect(v2.toProps().employeeId).toBe('emp-1');
+    });
+
+    it('records a SalaryStructureVersionCreated event carrying previousVersionId/previousVersion metadata', () => {
+      const v1 = SalaryStructure.createInitialVersion({
+        organizationId: 'org-1',
+        employeeId: 'emp-1',
+        effectiveFrom: new Date('2026-01-01'),
+        baseSalaryLineItems: [],
+      });
+      v1.pullDomainEvents(); // isolate this test to the version-creation event
+
+      const v2 = SalaryStructure.createNextVersion(v1, {
+        effectiveFrom: new Date('2026-08-01'),
+        baseSalaryLineItems: [],
+      });
+
+      const events = v2.pullDomainEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].type).toBe('SalaryStructureVersionCreated');
+      expect(events[0].payload).toMatchObject({
+        previousVersionId: v1.id,
+        previousVersion: 1,
+        version: 2,
+      });
+    });
+
+    it('does not duplicate baseSalaryLineItems into the version-created event payload', () => {
+      const v1 = SalaryStructure.createInitialVersion({
+        organizationId: 'org-1',
+        employeeId: 'emp-1',
+        effectiveFrom: new Date('2026-01-01'),
+        baseSalaryLineItems: [
+          { kind: 'allowance', label: 'Base', amount: Money.of(300000n, 'NGN') },
+        ],
+      });
+
+      const v2 = SalaryStructure.createNextVersion(v1, {
+        effectiveFrom: new Date('2026-08-01'),
+        baseSalaryLineItems: [
+          { kind: 'allowance', label: 'Raised', amount: Money.of(350000n, 'NGN') },
+        ],
+      });
+
+      const events = v2.pullDomainEvents();
+      const versionEvent = events.find((e) => e.type === 'SalaryStructureVersionCreated')!;
+      expect(Object.keys(versionEvent.payload).sort()).toEqual([
+        'effectiveFrom',
+        'employeeId',
+        'organizationId',
+        'previousVersion',
+        'previousVersionId',
+        'version',
+      ]);
     });
   });
 
