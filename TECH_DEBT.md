@@ -207,30 +207,84 @@ for `auditor` cannot be explained by the guard never running), an exact response
 set (#21) with `organizationId` absent (#22/#47), a cross-org entry excluded, and
 400s for an unknown query param, a malformed date and an over-cap limit.
 
-### 52. Three audit blind spots a props diff cannot see
-**Where:** `PayrollRun` and `SalaryStructure` aggregates.
-**What:** #8's generic diff compares an aggregate's own `props` before and after a
-mutation. Three real state changes fall outside that:
-1. **`SalaryStructure` records ZERO events.** It has `recordEvent` available and never
-   calls it, so compensation changes — arguably the most sensitive data in the system
-   — produce no audit entry at all. Not a diff gap: a total absence of audit.
-2. **`PayrollRun.startProcessing()` changes `status` to `processing` and records no
-   event.** The transition into processing is invisible to the trail, so the history
-   jumps from `approved` to `completed`.
-3. **`PayrollRun.addPayslip()` mutates `this.payslips`, a sibling array, not `props`.**
-   It does record `PayrollRunPayslipAdded`, so the action is audited, but the event
-   carries no `changes` and its `old_value` is NULL — the payslip count before and
-   after is not recoverable from the entry.
+### 52. ~~Three audit blind spots a props diff cannot see~~ — RESOLVED
 
-**Why not fixed with #8:** (1) and (2) are missing domain events, not diff plumbing —
-adding them changes what flows through the outbox and what every global subscriber
-sees, which is event-pipeline work deserving its own review (CLAUDE.md asks before
-altering the event pipeline). (3) needs `snapshotState()` to include derived child
-state, which is a design question about what "the aggregate's state" means for diffing
-rather than a bug.
-**To close:** decide whether `SalaryStructure` should emit lifecycle events (almost
-certainly yes, given what it holds), add a `PayrollRunProcessingStarted` event, and
-consider including `payslipCount` in `PayrollRun.snapshotState()`.
+**Where:** `PayrollRun` and `SalaryStructure` aggregates.
+**What it was:** #8's generic diff compares an aggregate's own `props` before and
+after a mutation. Three real state changes fell outside that — see the original
+entry above for the full description of each.
+
+**Resolved in three parts, at different depths, stated explicitly rather than
+uniformly claimed:**
+
+1. **`SalaryStructure` records lifecycle events.** `createInitialVersion()` and
+   `createNextVersion()` now call `recordEvent()` with new `SalaryStructureCreated`
+   / `SalaryStructureVersionCreated` events. The version-transition event carries
+   `previousVersionId`/`previousVersion` as metadata only — deliberately not the
+   full `baseSalaryLineItems` arrays on both sides, a call made explicitly rather
+   than defaulted to.
+
+   **Unit-tested only, not integration or e2e — and that ceiling is real, not a
+   shortcut.** Investigating this surfaced #55 (no application handler calls
+   `createNextVersion()` at all — it is currently unreachable through any command
+   or HTTP route) and, separately, #56 (the *previous* version's `effectiveTo`
+   closure happens via a raw repository-level `updateMany`, entirely outside any
+   aggregate, and is therefore invisible to this fix and to the audit pipeline
+   regardless of it). Both are logged as their own items rather than folded in
+   here, since each is a real, independently-closeable gap. `createNextVersion()`'s
+   docstring was also corrected — it previously claimed to close the prior
+   version's `effectiveTo` itself, which the code never did.
+
+2. **`PayrollRun.startProcessing()` now records `PayrollRunProcessingStarted`.**
+   System-triggered, deliberately no actor parameter — confirmed this transition
+   has no human actor, unlike `approve()`/`reject()`/`cancel()`.
+
+3. **`PayrollRun.snapshotState()` now includes a derived `payslipCount`.** One
+   line, no other method touched: `addPayslip()`'s existing
+   `recordEvent(payslipGenerated(...))` call now picks up
+   `changes: { payslipCount: { from, to } }` automatically via `AggregateRoot`'s
+   generic diff, and every other mutating method's diff is unaffected since
+   `payslipCount` is identical before and after them.
+
+**Items 2 and 3 proved against the REAL pipeline, not a shortcut through
+`AuditLogService.record()` directly.** A new integration spec
+(`payroll-run-audit-trail.spec.ts`) wires `OutboxService`, the real
+`DomainEventDispatcher`, the real globally-registered `AuditSubscriber` (via
+`moduleRef.init()`, not just `.compile()` — the first integration spec that
+needed a subscriber to self-register), and the real `AuditLogService`/
+`PrismaUnitOfWork`, then drives dispatch through `OutboxDispatchService
+.dispatchPendingBatch()` called directly — per #9, that method has zero BullMQ
+dependency on its success path, which is what makes this reachable without a
+live queue or HTTP surface at all. `FailedEventDeliveryService` and the retry
+scheduler are faked (`useValue`), since neither is exercised unless a subscriber
+fails, which this path doesn't produce.
+
+Both assertions prove something the run's own persisted row cannot: for item 2,
+`ProcessPayrollRunHandler` calls `startProcessing()` and `complete()` in the same
+transaction, so a `PayrollRun` row is *never observed* at `status: 'processing'`
+in the database — the transition exists solely as the audit entry's
+`{ from: 'approved', to: 'processing' }` diff, proven directly against a real
+`audit_log_entries` row rather than inferred.
+
+**Deliberately no e2e coverage for items 2/3** — an explicit scope decision, not
+an oversight: the goal was proving the real event → outbox → audit persistence
+path against Postgres without standing up a new payroll HTTP test surface. If
+that boundary is ever revisited, `test/e2e/` currently has no payroll-named spec
+at all; it would be new-file work, the same size of lift `audit-log-verify
+.e2e.spec.ts` was for the audit chain verifier.
+
+**Coverage:** unit tests across `payroll-run.aggregate.spec.ts` (a `TECH_DEBT #52`
+block: `startProcessing()`'s event, the `status` and `payslipCount` diffs via
+`reconstitute()` — the only path that activates baseline-diffing at all, since
+`create()` deliberately never calls `captureBaseline()` — and a regression pin
+confirming a freshly-`create()`'d run's own creation event still carries no
+`changes` key), `salary-structure.aggregate.spec.ts` (both new events fire, and
+the version-transition payload's exact key set excludes line items), and a new
+`salary-structure.events.spec.ts` (direct factory-function shape checks — new
+because `SalaryStructure` had no prior events to have established that pattern,
+unlike `PayrollRun`'s five pre-existing events, which have only ever been tested
+through the aggregate). Plus the new integration spec above, 2 tests, both green
+against real Postgres.
 
 ### 53. ~~No audit chain verifier exists — the tamper-detection guarantee is unimplemented~~ — RESOLVED
 `ChainVerifierService` (`src/audit-log/application/chain-verifier.service.ts`)
@@ -284,6 +338,53 @@ a string specifically so bigint amounts never become floats (convention #1)
 by design elsewhere in the system.
 **To close further:** only worth revisiting if a payload ever legitimately
 needs to carry a genuine floating-point value.
+
+### 55. `SalaryStructure.createNextVersion()` has no caller — versioning is unreachable
+
+**Where:** `SalaryStructure` aggregate, `src/contexts/payroll/application/handlers`.
+**What:** Found while investigating #52's SalaryStructure event work. `createNextVersion()`'s own docstring describes it as closing the previous
+version's `effectiveTo` when a new version is created — but no command handler
+in the payroll application layer calls this method at all (confirmed by grep
+against `application/handlers`, zero matches). `createInitialVersion()` may or
+may not have a caller either; not checked as part of this finding. As it
+stands, a `SalaryStructure` can be created once and never revised through the
+application — the multi-version design the aggregate, `Payslip`'s
+snapshot-at-generation-time safety property, and this docstring all assume is
+not reachable by any endpoint.
+**Why acceptable so far:** No production data exists yet (per #10's precedent
+for the same claim), and every employee currently has at most one salary
+structure version in practice, so the gap has not caused an observable
+problem. But it is not a hardening item — it's a missing feature.
+**To close:** Build `CreateNextSalaryStructureVersionHandler` (or equivalent).
+Two real design questions belong there, not here:
+1. Does closing the previous version happen via a method on
+   `SalaryStructure` itself (e.g. `previous.close(effectiveFrom)`, a normal
+   in-place mutation an already-`reconstitute()`d instance could make, which
+   the generic props diff from #8 WOULD pick up cleanly as
+   `effectiveTo: { from: null, to: <date> }`), or is it a raw repository
+   update alongside inserting the new row? The former keeps the invariant
+   inside the aggregate; the latter splits it across layers.
+2. If it's an aggregate method, does it need its own domain event, or does
+   the auto-diffed `changes` on whatever event already exists at that point
+   cover it? (No event exists yet either way, since no such mutation exists.)
+
+### 56. `SalaryStructure` version closure is persisted directly by the repository, invisible to the audit pipeline
+
+**Where:** `PrismaSalaryStructureRepository.save()`
+**What:** When saving a version > 1, save() closes the previous active version's
+effectiveTo via a raw scoped `updateMany`, entirely in SQL — no SalaryStructure
+instance representing the previous version is ever loaded, mutated, or diffed.
+Confirmed employee-scoped and transactionally atomic (see investigation), but
+structurally unauditable: no domain event exists or can exist for this mutation
+under the current design, since no aggregate is ever involved in it. Distinct
+from #52 (which is about diff-visibility on mutations that DO happen) and from
+#55 (reachability) — this gap exists independent of either.
+**To close:** move the closing mutation into SalaryStructure itself (a `close()`
+method + new event), and change the repository/handler to persist and emit
+events from both the previous and next instances in one transaction, mirroring
+PayrollRun's startProcessing()+complete() pattern. Design question left open:
+whether createNextVersion() should call previous.close() internally or whether
+the (not-yet-built, per #55) handler should orchestrate both explicitly.
 
 ### 9. ~~Failed event delivery to one subscriber is only logged, not retried~~ — RESOLVED
 **Why this mattered more than the original wording suggested:** `AuditSubscriber`
