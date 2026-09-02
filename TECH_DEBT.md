@@ -339,52 +339,93 @@ by design elsewhere in the system.
 **To close further:** only worth revisiting if a payload ever legitimately
 needs to carry a genuine floating-point value.
 
-### 55. `SalaryStructure.createNextVersion()` has no caller — versioning is unreachable
+### 55. ~~`SalaryStructure.createNextVersion()` has no caller — versioning is unreachable~~ — RESOLVED
 
-**Where:** `SalaryStructure` aggregate, `src/contexts/payroll/application/handlers`.
-**What:** Found while investigating #52's SalaryStructure event work. `createNextVersion()`'s own docstring describes it as closing the previous
-version's `effectiveTo` when a new version is created — but no command handler
-in the payroll application layer calls this method at all (confirmed by grep
-against `application/handlers`, zero matches). `createInitialVersion()` may or
-may not have a caller either; not checked as part of this finding. As it
-stands, a `SalaryStructure` can be created once and never revised through the
-application — the multi-version design the aggregate, `Payslip`'s
-snapshot-at-generation-time safety property, and this docstring all assume is
-not reachable by any endpoint.
-**Why acceptable so far:** No production data exists yet (per #10's precedent
-for the same claim), and every employee currently has at most one salary
-structure version in practice, so the gap has not caused an observable
-problem. But it is not a hardening item — it's a missing feature.
-**To close:** Build `CreateNextSalaryStructureVersionHandler` (or equivalent).
-Two real design questions belong there, not here:
-1. Does closing the previous version happen via a method on
-   `SalaryStructure` itself (e.g. `previous.close(effectiveFrom)`, a normal
-   in-place mutation an already-`reconstitute()`d instance could make, which
-   the generic props diff from #8 WOULD pick up cleanly as
-   `effectiveTo: { from: null, to: <date> }`), or is it a raw repository
-   update alongside inserting the new row? The former keeps the invariant
-   inside the aggregate; the latter splits it across layers.
-2. If it's an aggregate method, does it need its own domain event, or does
-   the auto-diffed `changes` on whatever event already exists at that point
-   cover it? (No event exists yet either way, since no such mutation exists.)
+Resolved together with #56 — see that entry for the shared design. A full
+employee-compensation command surface now exists, nested under `EmployeeController`
+as a sub-resource (`/employees/:id/salary-structure`, matching #42's precedent for
+where employee-adjacent capability lives): `POST` to create the initial version,
+`POST .../versions` to create the next one, `GET` for the active version. Backed by
+two new handlers (`CreateSalaryStructureHandler`, `CreateSalaryStructureVersionHandler`)
+and one query handler (`GetActiveSalaryStructureHandler`), all in a new
+`application/salary-structure/` module mirroring `application/employee/`'s grouped-file
+shape rather than `PayrollRun`'s one-file-per-command layout — the more recent
+precedent in this bounded context.
 
-### 56. `SalaryStructure` version closure is persisted directly by the repository, invisible to the audit pipeline
+**No new permission seeded.** Reuses `payroll:create`, already granted to
+`accountant`/`finance_director` — the same reasoning #48 already established for
+`period:open`/reopen: inventing a dedicated permission here would grant neither role
+a capability they don't already effectively have via `AddPayslipHandler`/
+`payroll:view_sensitive`.
 
-**Where:** `PrismaSalaryStructureRepository.save()`
-**What:** When saving a version > 1, save() closes the previous active version's
-effectiveTo via a raw scoped `updateMany`, entirely in SQL — no SalaryStructure
-instance representing the previous version is ever loaded, mutated, or diffed.
-Confirmed employee-scoped and transactionally atomic (see investigation), but
-structurally unauditable: no domain event exists or can exist for this mutation
-under the current design, since no aggregate is ever involved in it. Distinct
-from #52 (which is about diff-visibility on mutations that DO happen) and from
-#55 (reachability) — this gap exists independent of either.
-**To close:** move the closing mutation into SalaryStructure itself (a `close()`
-method + new event), and change the repository/handler to persist and emit
-events from both the previous and next instances in one transaction, mirroring
-PayrollRun's startProcessing()+complete() pattern. Design question left open:
-whether createNextVersion() should call previous.close() internally or whether
-the (not-yet-built, per #55) handler should orchestrate both explicitly.
+**Cross-organization access returns 404, not 403 or a silent success**, in both the
+version-creation handler and the query handler — `findActiveForEmployee()` is NOT
+organizationId-scoped at the query level (confirmed during the #56 investigation), so
+this is enforced explicitly at the application layer instead, following #43/#48/#49's
+established "not yours is indistinguishable from doesn't exist" reasoning.
+
+**Coverage:** unit tests for all three handlers (existing-structure conflict,
+happy-path creation, cross-org 404 on both the version handler and the query handler,
+and — the assertion that actually proves #56's fix — that `saveNextVersion()` receives
+`previous` already closed, and that both instances' events are merged into one
+`outbox.enqueue()` call). Response shape is an explicit `SalaryStructureView` type,
+not an inferred object literal (#21's discipline). Both new handlers implement the
+shared kernel's `CommandHandler`/`QueryHandler` interfaces explicitly, matching every
+other handler in the codebase — caught and fixed after initial review, since
+`GetActiveSalaryStructureHandler` initially did not.
+
+### 56. ~~`SalaryStructure` version closure was persisted directly by the repository, invisible to the audit pipeline~~ — RESOLVED
+
+**What it was:** `PrismaSalaryStructureRepository.save()` closed the previous active
+version's `effectiveTo` via a raw, employee-scoped `updateMany`, derived entirely from
+the NEW structure's own props — no `SalaryStructure` instance representing the
+previous version was ever loaded, mutated, or diffed. Confirmed employee-scoped and
+transactionally atomic on investigation, but structurally unauditable: no domain event
+could exist for this mutation under that design, since no aggregate was ever involved
+in it. A genuinely bigger gap than #52's three original items, which were all about
+diff-VISIBILITY on a mutation that did happen — this was "no mutation through the
+aggregate happens at all."
+
+**Fixed by moving the closure into the aggregate, as the investigation recommended.**
+New `SalaryStructure.close(effectiveTo: Date)` mutates `props.effectiveTo` in memory
+and calls `recordEvent()` with a new `SalaryStructureClosed` event — ordinary
+mutate-then-record, so `AggregateRoot`'s existing generic diff (#8) picks it up with
+zero special-casing: `changes: { effectiveTo: { from: null, to: <date> } }`.
+
+**Orchestrated externally, not internally inside `createNextVersion()`.** Considered
+having the static factory mutate its own `previous` argument as a side effect and
+rejected it: no other factory in this codebase does that, and it would have been a
+surprising, undocumented shape for a supposedly pure factory. Instead
+`CreateSalaryStructureVersionHandler` calls `previous.close(...)` explicitly after
+`createNextVersion()`, then merges `previous.pullDomainEvents()` and
+`next.pullDomainEvents()` into one `outbox.enqueue()` call — mirroring
+`ProcessPayrollRunHandler`'s existing `startProcessing()` + `complete()` pattern
+exactly, the one precedent this codebase already had for "two mutations, one
+transaction, one merged enqueue."
+
+**Repository contract reshaped, not just patched.** `save()` is now a plain single-row
+insert with no closing side effect at all. New `saveNextVersion(previous, next, tx)`
+does the closing `UPDATE` — scoped by primary key (`where: { id: previousProps.id }`),
+which is strictly tighter than the old `employeeId`-only filter and makes the
+investigation's flagged "no `organizationId` in the WHERE clause" concern moot, since
+an id-scoped lookup cannot cross tenants by construction — then calls `save(next, tx)`.
+The value written is `previous`'s own mutated `effectiveTo`, not re-derived from a
+different instance.
+
+**Existing integration test was invalidated by this change, not just extended.** The
+old `'createNextVersion + save() closes out the previous active version'` test called
+`repo.save(v2, tx)` expecting an implicit side effect that no longer exists under the
+new contract — rewritten to reload `v1` (so it carries a real baseline), call
+`close()` explicitly, and use `saveNextVersion()`, matching the real handler's actual
+sequence rather than the old shortcut.
+
+**Coverage:** dedicated aggregate-level unit tests for `close()` — the event fires
+with the correct diff shape, `effectiveTo` is genuinely mutated on the instance (not
+only reflected in the event payload), and a regression pin confirming `close()` on a
+freshly-`create()`'d instance (no baseline) correctly produces no `changes` at all,
+consistent with `create()`'s existing semantics elsewhere. Both rewritten integration
+tests pass against real Postgres. Handler-level unit coverage (see #55) additionally
+proves the full orchestration end-to-end at the application layer.
 
 ### 9. ~~Failed event delivery to one subscriber is only logged, not retried~~ — RESOLVED
 **Why this mattered more than the original wording suggested:** `AuditSubscriber`
