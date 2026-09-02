@@ -58,3 +58,25 @@ export function salaryStructureVersionCreated(
     },
   };
 }
+
+/**
+ * TECH_DEBT #56 — the previous version's effectiveTo closure now happens
+ * through the aggregate (SalaryStructure.close()), not as a raw repository-
+ * level UPDATE derived from a different, unloaded instance's props. This is
+ * what makes the closure visible to AuditSubscriber at all.
+ */
+export function salaryStructureClosed(
+  structureId: string,
+  organizationId: string,
+  employeeId: string,
+  version: number,
+  effectiveTo: Date,
+): DomainEvent {
+  return {
+    type: 'SalaryStructureClosed',
+    aggregateType: AGGREGATE_TYPE,
+    aggregateId: structureId,
+    occurredAt: new Date(),
+    payload: { organizationId, employeeId, version, effectiveTo: effectiveTo.toISOString() },
+  };
+}
