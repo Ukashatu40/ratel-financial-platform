@@ -34,6 +34,14 @@ export class CashOutflowHandler implements QueryHandler<CashOutflowQuery, CashOu
         ? user.roles.filter((r) => r.departmentId).map((r) => r.departmentId!)
         : null;
 
+    // Fail closed, mirroring the null-scope check above: a department-scoped
+    // caller with no resolvable departmentIds must never fall through to the
+    // unfiltered branch below — that would silently return organization-wide
+    // data to someone whose grant is department-scoped. Previously this case
+    // fell through unfiltered; found while writing test coverage for this
+    // handler, not a designed behavior.
+    if (scope === 'department' && departmentIds!.length === 0) return [];
+
     type RawRow = { month: Date; total: bigint; count: bigint };
     let rows: RawRow[];
 
