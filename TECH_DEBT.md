@@ -829,64 +829,80 @@ Fixed all three layers of that, not just the syntax:
 
 ## Data Integrity
 
-### 14. `UserRoleAssignment`'s compound unique doesn't fully hold with nullable `departmentId`
-**Where:** `@@unique([userId, role, departmentId])` on `UserRoleAssignment`.
-**What:** Postgres treats every `NULL` as distinct within a unique index, so
-this constraint does NOT prevent two rows with the same `(userId, role,
-null)` — i.e. duplicate org-scoped role assignments (any role other than
-`department_head`) could be inserted without violating the DB constraint.
-Discovered via a TS2322 error in the seed script when trying to build a
-compound-unique `where` clause including `null` — Prisma's generated typing
-surfaced the underlying semantic gap.
-**Why acceptable so far:** Seed script now works around it with a manual
-`findFirst`-then-`create` check instead of relying on the constraint;
-duplicate assignments are merely redundant today; no real user-facing
-mutation path creates `UserRoleAssignment` rows yet (only the seed script
-does).
-**To close:** Either (a) use a non-null sentinel value for org-scoped roles'
-`departmentId` instead of `null` — e.g. reference the organization's own ID
-as a placeholder — or (b) split into two tables (`DepartmentRoleAssignment`
-vs `OrganizationRoleAssignment`) so the unique constraint doesn't need a
-nullable column at all. Must be fixed before any endpoint allows users to
-self-assign or admins to assign roles through the API — right now it's a
-seed-only quirk with no production exposure.
+### 14. ~~`UserRoleAssignment`'s compound unique doesn't fully hold with nullable `departmentId`~~ — RESOLVED
 
-**Investigated 2026-08-21, and the attractive third option does NOT exist.**
-PostgreSQL 15 (this project's version) supports `UNIQUE NULLS NOT DISTINCT`, which
-would make the EXISTING constraint behave exactly as intended — no sentinel, no
-table split, no reshaping. Prisma's schema language cannot express it: adding
-`@@unique([userId, role, departmentId], nullsNotDistinct: true)` fails
-`prisma validate` outright (checked against a throwaway copy of the schema rather
-than assumed). The string appears in `@prisma/studio-core`'s driver code but not in
-the schema engine.
+**What it was:** `@@unique([userId, role, departmentId])` did not actually prevent
+duplicate org-scoped role assignments, since Postgres treats every `NULL` as
+distinct within a unique index. The entry's own investigation had already ruled
+out `UNIQUE NULLS NOT DISTINCT` (Prisma cannot express it; hand-written SQL fights
+migration diffing, the same trap #15 hit) and recommended splitting into two
+tables as the fix that ends the problem rather than routing around it.
 
-That leaves only hand-written SQL for either `NULLS NOT DISTINCT` or the equivalent
-partial index
-(`CREATE UNIQUE INDEX … ON user_role_assignments (user_id, role) WHERE department_id IS NULL`).
-Both are expected to fight `migrate dev`: Prisma derives the expected database state
-by replaying migrations into a shadow database and diffing it against
-`schema.prisma`, so an index the schema does not declare reads as drift and gets a
-generated migration to drop it. That is the same trap #15 records for native
-partitioning. **Caveat on this specific point:** the `prisma validate` rejection was
-verified directly; the drift consequence is Prisma's documented diffing behaviour
-plus #15's recorded experience, and was not separately re-run here.
+**Fixed exactly as recommended — no sentinel, no sentinel-meaning drift.**
+`UserRoleAssignment` is replaced by `DepartmentRoleAssignment`
+(`@@unique([userId, role, departmentId])`, `departmentId` NOT nullable — this
+table only ever holds department-scoped rows) and `OrganizationRoleAssignment`
+(`@@unique([userId, role])`, no `departmentId` column at all). Both constraints
+now hold natively, with nothing for the DB to fight and no raw SQL required.
 
-**So this stays OPEN, deliberately, with no partial fix applied.** Working around
-the nullable column with raw SQL that Prisma will fight is worse than the current
-state, which is a seed-only quirk with **no production exposure** — reconfirmed:
-`userRoleAssignment` still has only `findMany`/`findFirst` reads outside the seed
-script, so nothing in the API can create a duplicate. The trigger condition this
-item names has not arrived.
+**No backfill** — reconfirmed at the point of migration: `UserRoleAssignment` was
+still seed-script-only with zero production exposure, the same finding the
+original entry already made. Same precedent #10 already used for a schema-shape
+change needing no data migration.
 
-**Recommendation for whoever closes it:** prefer (b), the table split. Option (a)'s
-sentinel keeps the nullable column and adds a lie — `departmentId` holding an
-organization id — and every existing `departmentId === null` check (permission
-guard, `EffectiveScopeResolver`, seed) would have to change meaning in lockstep,
-which is a silent-drift risk across security-relevant code. (b) removes the nullable
-column from the constraint entirely, so the DB enforces the rule natively with no
-raw SQL and nothing for Prisma to fight. It is the larger change, but it is the one
-that ends the problem instead of routing around it — and the right moment for it is
-when the role-assignment API is built, not before.
+**The real work was the call-site audit, not the schema change.** `grep`-driven,
+not assumed — five real consumers found across two rounds of searching, not the
+two originally suspected:
+
+1. `PrismaUserRoleService.getRolesForUser()` — the one true seam. Now queries
+   both tables and merges into the same `RoleAssignment[]` shape every consumer
+   already depended on.
+2. `AuthService.login()`/`refresh()` — was bypassing the port entirely with a
+   direct `prisma.user.findUnique({ include: { roleAssignments: true } })`.
+   Refactored onto `USER_ROLE_SERVICE` instead of adapted to query two tables
+   inline, removing a duplicate-logic call site rather than just patching it.
+   **Caught and fixed a real, pre-existing bug while in this code:** `refresh()`
+   had no empty-assignments guard, unlike `login()` — a user whose roles were
+   all removed between token issuance and refresh would hit a raw `TypeError`
+   (500) instead of a clean 401. Not a separately-deferred item; fixed in the
+   same change since the method body was already being touched.
+3. `NotificationProcessor` — same direct-query pattern as `AuthService`, same
+   fix, now onto the same seam.
+4. `NotificationSubscriber.handlePeriodStatusChange()` — a genuinely different
+   shape (reverse lookup: "which users hold any of these roles" driven
+   dynamically off `role_permissions`, not "which roles does this user hold").
+   Doesn't fit `UserRoleService`'s per-user shape, so queried directly across
+   both tables and merged — a second port wasn't justified for one caller,
+   unlike `ResourceScopeRegistry`'s genuine multi-provider need.
+5. `WorkflowEngine`'s test double (`FakeUserRoleService` in
+   `workflow-engine.spec.ts`) — found only via `npm run build`, not `grep`,
+   since it's a test fixture implementing `UserRoleService`'s interface rather
+   than querying Prisma. `RoleAssignment` gained a required `organizationId`
+   field (deliberately — consolidates items 2 and 3 above onto one shape rather
+   than each independently reimplementing "merge two tables, take any result"),
+   which is a breaking change to every literal construction of that type. The
+   compiler caught all 8 call sites in this file directly; none needed logic
+   changes, since `WorkflowEngine`'s role verification never reads
+   `organizationId` — confirmed by inspection before adding a placeholder value
+   to each.
+
+**`PermissionGuard`, `PrismaEffectiveScopeResolver`, and `ResourceScopeRegistry`
+confirmed untouched** — none of them ever read the raw assignment table
+directly; all three consume either already-resolved `UserPrincipal.roles` or
+the unrelated `RolePermission` table.
+
+**Seed script gained a real capability, not just a routing branch.** The
+original manual find-then-create workaround existed specifically because the
+compound unique couldn't reliably match a null-`departmentId` row. Neither new
+table has a nullable column in its key, so genuine `upsert()` now works —
+the workaround this fix replaces is obsolete, not merely routed around.
+
+**Verification order matched the risk:** e2e first (real Postgres, real HTTP,
+all 9 rewritten fixture files — the widest blast radius of any change this
+session), confirmed green; then a full `npm run build`, which surfaced the
+`WorkflowEngine` test double as a second surprise call site; fixed, rebuilt
+clean; then the full unit suite. All three layers green before this entry was
+closed, consistent with #52/#55/#56's standard.
 
 ## Performance
 
