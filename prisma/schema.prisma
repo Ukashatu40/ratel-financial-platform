@@ -195,7 +195,8 @@ model User {
   createdAt    DateTime @default(now()) @map("created_at")
 
   closedPeriods    FinancialPeriod[] @relation("PeriodClosedBy")
-  roleAssignments  UserRoleAssignment[]
+  departmentRoleAssignments   DepartmentRoleAssignment[]
+  organizationRoleAssignments OrganizationRoleAssignment[]
   refreshTokens    RefreshToken[]
 
   @@map("users")
@@ -204,19 +205,35 @@ model User {
 // A user can hold multiple roles (e.g. an Accountant who is ALSO a
 // department head for their own team). departmentId is only meaningful for
 // department-scoped roles (department_head) — null for org-scoped roles.
-model UserRoleAssignment {
+model DepartmentRoleAssignment {
   id             String   @id @default(uuid())
   userId         String   @map("user_id")
   organizationId String   @map("organization_id")
   role           RoleName
-  departmentId   String?  @map("department_id")
+  departmentId   String   @map("department_id") // NOT nullable — only ever department-scoped rows
   createdAt      DateTime @default(now()) @map("created_at")
 
   user User @relation(fields: [userId], references: [id])
 
-  @@unique([userId, role, departmentId])
+  @@unique([userId, role, departmentId]) // holds correctly now — no nullable column in the key
   @@index([userId])
-  @@map("user_role_assignments")
+  @@index([organizationId, role]) // serves NotificationSubscriber's reverse lookup
+  @@map("department_role_assignments")
+}
+
+model OrganizationRoleAssignment {
+  id             String   @id @default(uuid())
+  userId         String   @map("user_id")
+  organizationId String   @map("organization_id")
+  role           RoleName
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([userId, role])
+  @@index([userId])
+  @@index([organizationId, role])
+  @@map("organization_role_assignments")
 }
 
 // Phase 9.1's permission matrix, made literal data rather than a code
