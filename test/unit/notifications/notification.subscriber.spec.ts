@@ -40,7 +40,10 @@ describe('NotificationSubscriber — #32 additions', () => {
       payrollRun: { findFirst: jest.fn() },
       financialPeriod: { findFirst: jest.fn() },
       rolePermission: { findMany: jest.fn() },
-      userRoleAssignment: { findMany: jest.fn() },
+      // TECH_DEBT #14 — was a single userRoleAssignment mock; the real
+      // subscriber now queries both split tables and merges the results.
+      departmentRoleAssignment: { findMany: jest.fn() },
+      organizationRoleAssignment: { findMany: jest.fn() },
     };
 
     subscriber = new NotificationSubscriber(dispatcher as any, prisma, queue as any);
@@ -65,8 +68,6 @@ describe('NotificationSubscriber — #32 additions', () => {
 
   describe('PayrollRunRejected', () => {
     it('notifies the run creator, with the rejection reason', () => {
-      // Mirrors ExpenseRejected: the person who needs to know is whoever created the
-      // thing that was rejected, not the approver who rejected it.
       prisma.payrollRun.findFirst.mockResolvedValue({
         id: 'run-1',
         createdById: 'payroll-admin-1',
@@ -108,7 +109,11 @@ describe('NotificationSubscriber — #32 additions', () => {
         { role: 'finance_director' }, // holds both period:open and period:close
         { role: 'accountant' },
       ]);
-      prisma.userRoleAssignment.findMany.mockResolvedValue([
+      // Both roles are org-scoped in every fixture across this codebase
+      // (finance_director/accountant never carry a departmentId), so the
+      // department table legitimately returns nothing for this case.
+      prisma.departmentRoleAssignment.findMany.mockResolvedValue([]);
+      prisma.organizationRoleAssignment.findMany.mockResolvedValue([
         { userId: 'user-1' },
         { userId: 'user-2' },
       ]);
@@ -131,22 +136,28 @@ describe('NotificationSubscriber — #32 additions', () => {
       ]);
     });
 
-    it('deduplicates roles before querying assignments', async () => {
-      // finance_director appears twice above (it holds both period permissions). A
-      // duplicated role in the `in` clause would risk duplicate assignment rows and
-      // so duplicate emails about a single close.
+    it('queries BOTH assignment tables with the same deduplicated role filter', async () => {
+      // finance_director appears twice above (holds both period permissions). A
+      // duplicated role in the `in` clause risks duplicate assignment rows and so
+      // duplicate emails about a single close — checked on both tables now, since
+      // the real subscriber queries both with the identical filter.
       await dispatch(event('PeriodClosed'));
 
-      const where = prisma.userRoleAssignment.findMany.mock.calls[0][0].where;
-      expect(where.role.in).toEqual(['finance_director', 'accountant']);
-      expect(where.organizationId).toBe('org-1');
+      for (const mock of [
+        prisma.departmentRoleAssignment.findMany,
+        prisma.organizationRoleAssignment.findMany,
+      ]) {
+        const where = mock.mock.calls[0][0].where;
+        expect(where.role.in).toEqual(['finance_director', 'accountant']);
+        expect(where.organizationId).toBe('org-1');
+      }
     });
 
-    it('deduplicates recipients, so one user is not emailed twice', async () => {
-      prisma.userRoleAssignment.findMany.mockResolvedValue([
-        { userId: 'user-1' },
-        { userId: 'user-1' }, // same user, two departments
-      ]);
+    it('deduplicates recipients across BOTH tables, so one user is not emailed twice', async () => {
+      // A user could hold a department-scoped grant AND an org-scoped one — this
+      // is the merge-then-dedupe path, not just dedupe within one table's rows.
+      prisma.departmentRoleAssignment.findMany.mockResolvedValue([{ userId: 'user-1' }]);
+      prisma.organizationRoleAssignment.findMany.mockResolvedValue([{ userId: 'user-1' }]);
 
       await dispatch(event('PeriodClosed'));
 
@@ -166,22 +177,24 @@ describe('NotificationSubscriber — #32 additions', () => {
       expect(enqueued()[0].templateData).not.toHaveProperty('reason');
     });
 
-    it('enqueues nothing when no user holds a period permission', async () => {
-      prisma.userRoleAssignment.findMany.mockResolvedValue([]);
+    it('enqueues nothing when no user holds a period permission in either table', async () => {
+      prisma.departmentRoleAssignment.findMany.mockResolvedValue([]);
+      prisma.organizationRoleAssignment.findMany.mockResolvedValue([]);
 
       await dispatch(event('PeriodClosed'));
 
       expect(queue.add).not.toHaveBeenCalled();
     });
 
-    it('enqueues nothing when no role is granted a period permission at all', async () => {
-      // Guards against the `in: []` query, which would match every assignment rather
-      // than none — the failure mode being that everyone gets emailed.
+    it('enqueues nothing when no role is granted a period permission at all, and queries neither table', async () => {
+      // Guards against the `in: []` query, which would match every assignment
+      // rather than none — the failure mode being that everyone gets emailed.
       prisma.rolePermission.findMany.mockResolvedValue([]);
 
       await dispatch(event('PeriodClosed'));
 
-      expect(prisma.userRoleAssignment.findMany).not.toHaveBeenCalled();
+      expect(prisma.departmentRoleAssignment.findMany).not.toHaveBeenCalled();
+      expect(prisma.organizationRoleAssignment.findMany).not.toHaveBeenCalled();
       expect(queue.add).not.toHaveBeenCalled();
     });
   });

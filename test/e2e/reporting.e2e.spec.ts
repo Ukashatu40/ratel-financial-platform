@@ -73,16 +73,16 @@ describe('Reporting (e2e)', () => {
     });
 
     const employeeA = await prisma.user.create({ data: { email: 'ea@e2e.test', passwordHash } });
-    await prisma.userRoleAssignment.create({
-      data: { userId: employeeA.id, organizationId: org.id, role: 'employee', departmentId: null },
+    await prisma.organizationRoleAssignment.create({
+      data: { userId: employeeA.id, organizationId: org.id, role: 'employee' },
     });
     const employeeB = await prisma.user.create({ data: { email: 'eb@e2e.test', passwordHash } });
-    await prisma.userRoleAssignment.create({
-      data: { userId: employeeB.id, organizationId: org.id, role: 'employee', departmentId: null },
+    await prisma.organizationRoleAssignment.create({
+      data: { userId: employeeB.id, organizationId: org.id, role: 'employee' },
     });
 
     const deptAHead = await prisma.user.create({ data: { email: 'dah@e2e.test', passwordHash } });
-    await prisma.userRoleAssignment.create({
+    await prisma.departmentRoleAssignment.create({
       data: {
         userId: deptAHead.id,
         organizationId: org.id,
@@ -92,7 +92,7 @@ describe('Reporting (e2e)', () => {
     });
 
     const deptBHead = await prisma.user.create({ data: { email: 'dbh@e2e.test', passwordHash } });
-    await prisma.userRoleAssignment.create({
+    await prisma.departmentRoleAssignment.create({
       data: {
         userId: deptBHead.id,
         organizationId: org.id,
@@ -104,13 +104,8 @@ describe('Reporting (e2e)', () => {
     const financeDirector = await prisma.user.create({
       data: { email: 'fd@e2e.test', passwordHash },
     });
-    await prisma.userRoleAssignment.create({
-      data: {
-        userId: financeDirector.id,
-        organizationId: org.id,
-        role: 'finance_director',
-        departmentId: null,
-      },
+    await prisma.organizationRoleAssignment.create({
+      data: { userId: financeDirector.id, organizationId: org.id, role: 'finance_director' },
     });
 
     const login = async (email: string) =>

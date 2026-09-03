@@ -55,14 +55,14 @@ describe('Expense lifecycle (e2e)', () => {
     const employee = await prisma.user.create({
       data: { email: 'employee@e2e.test', passwordHash },
     });
-    await prisma.userRoleAssignment.create({
-      data: { userId: employee.id, organizationId: orgId, role: 'employee', departmentId: null },
+    await prisma.organizationRoleAssignment.create({
+      data: { userId: employee.id, organizationId: orgId, role: 'employee' },
     });
 
     const deptHead = await prisma.user.create({
       data: { email: 'depthead@e2e.test', passwordHash },
     });
-    await prisma.userRoleAssignment.create({
+    await prisma.departmentRoleAssignment.create({
       data: {
         userId: deptHead.id,
         organizationId: orgId,
@@ -78,13 +78,8 @@ describe('Expense lifecycle (e2e)', () => {
     const financeDirector = await prisma.user.create({
       data: { email: 'findir@e2e.test', passwordHash },
     });
-    await prisma.userRoleAssignment.create({
-      data: {
-        userId: financeDirector.id,
-        organizationId: orgId,
-        role: 'finance_director',
-        departmentId: null,
-      },
+    await prisma.organizationRoleAssignment.create({
+      data: { userId: financeDirector.id, organizationId: orgId, role: 'finance_director' },
     });
 
     await prisma.rolePermission.createMany({
@@ -295,7 +290,7 @@ describe('Expense lifecycle (e2e)', () => {
       const deptBHead = await prisma.user.create({
         data: { email: 'deptbhead@e2e.test', passwordHash },
       });
-      await prisma.userRoleAssignment.create({
+      await prisma.departmentRoleAssignment.create({
         data: {
           userId: deptBHead.id,
           organizationId: orgId,

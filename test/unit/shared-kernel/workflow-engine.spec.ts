@@ -1,4 +1,4 @@
-// test/unit/shared-kernel/workflow-engine.spec.ts (replace entire file)
+// test/unit/shared-kernel/workflow-engine.spec.ts
 import {
   WorkflowEngine,
   SelfApprovalNotAllowedError,
@@ -68,7 +68,9 @@ describe('WorkflowEngine', () => {
       ]);
       const progress = ApprovalProgress.start(item.id, chain);
 
-      fakeRoles.setRoles('wrong-role-user', [{ role: 'employee', departmentId: null }]);
+      fakeRoles.setRoles('wrong-role-user', [
+        { role: 'employee', departmentId: null, organizationId: 'org-1' },
+      ]);
 
       await expect(engine.recordApproval(item, progress, 'wrong-role-user')).rejects.toThrow(
         ApproverRoleMismatchError,
@@ -82,7 +84,9 @@ describe('WorkflowEngine', () => {
       ]);
       const progress = ApprovalProgress.start(item.id, chain);
 
-      fakeRoles.setRoles('dept-b-head', [{ role: 'department_head', departmentId: 'dept-B' }]);
+      fakeRoles.setRoles('dept-b-head', [
+        { role: 'department_head', departmentId: 'dept-B', organizationId: 'org-1' },
+      ]);
 
       await expect(engine.recordApproval(item, progress, 'dept-b-head')).rejects.toThrow(
         ApproverRoleMismatchError,
@@ -96,8 +100,9 @@ describe('WorkflowEngine', () => {
       ]);
       const progress = ApprovalProgress.start(item.id, chain);
 
-      fakeRoles.setRoles('dept-a-head', [{ role: 'department_head', departmentId: 'dept-A' }]);
-
+      fakeRoles.setRoles('dept-a-head', [
+        { role: 'department_head', departmentId: 'dept-A', organizationId: 'org-1' },
+      ]);
       await expect(engine.recordApproval(item, progress, 'dept-a-head')).resolves.toEqual({
         isFinalApproval: true,
       });
@@ -111,7 +116,9 @@ describe('WorkflowEngine', () => {
       const progress = ApprovalProgress.start(item.id, chain);
 
       // finance_director's departmentId is null (org-wide role) — should still pass
-      fakeRoles.setRoles('fd-1', [{ role: 'finance_director', departmentId: null }]);
+      fakeRoles.setRoles('fd-1', [
+        { role: 'finance_director', departmentId: null, organizationId: 'org-1' },
+      ]);
 
       await expect(engine.recordApproval(item, progress, 'fd-1')).resolves.toEqual({
         isFinalApproval: true,
@@ -127,7 +134,9 @@ describe('WorkflowEngine', () => {
         { order: 2, requiredRole: 'finance_director', requiredScope: 'organization' },
       ]);
       const progress = ApprovalProgress.start(item.id, chain);
-      fakeRoles.setRoles('dept-head-1', [{ role: 'department_head', departmentId: 'dept-A' }]);
+      fakeRoles.setRoles('dept-head-1', [
+        { role: 'department_head', departmentId: 'dept-A', organizationId: 'org-1' },
+      ]);
 
       const result = await engine.recordApproval(item, progress, 'dept-head-1');
       expect(result.isFinalApproval).toBe(false);
@@ -140,8 +149,12 @@ describe('WorkflowEngine', () => {
         { order: 2, requiredRole: 'finance_director', requiredScope: 'organization' },
       ]);
       const progress = ApprovalProgress.start(item.id, chain);
-      fakeRoles.setRoles('dept-head-1', [{ role: 'department_head', departmentId: 'dept-A' }]);
-      fakeRoles.setRoles('finance-director-1', [{ role: 'finance_director', departmentId: null }]);
+      fakeRoles.setRoles('dept-head-1', [
+        { role: 'department_head', departmentId: 'dept-A', organizationId: 'org-1' },
+      ]);
+      fakeRoles.setRoles('finance-director-1', [
+        { role: 'finance_director', departmentId: null, organizationId: 'org-1' },
+      ]);
 
       await engine.recordApproval(item, progress, 'dept-head-1');
       const result = await engine.recordApproval(item, progress, 'finance-director-1');
@@ -154,7 +167,9 @@ describe('WorkflowEngine', () => {
         { order: 1, requiredRole: 'department_head', requiredScope: 'department' },
       ]);
       const progress = ApprovalProgress.start(item.id, chain);
-      fakeRoles.setRoles('dept-head-1', [{ role: 'department_head', departmentId: 'dept-A' }]);
+      fakeRoles.setRoles('dept-head-1', [
+        { role: 'department_head', departmentId: 'dept-A', organizationId: 'org-1' },
+      ]);
 
       await engine.recordApproval(item, progress, 'dept-head-1');
       // No role check even reached here — currentStepRequirement() returns

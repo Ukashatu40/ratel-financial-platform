@@ -57,14 +57,14 @@ describe('Audit Log (e2e)', () => {
     const employee = await prisma.user.create({
       data: { email: 'employee@e2e.test', passwordHash },
     });
-    await prisma.userRoleAssignment.create({
-      data: { userId: employee.id, organizationId: orgId, role: 'employee', departmentId: null },
+    await prisma.organizationRoleAssignment.create({
+      data: { userId: employee.id, organizationId: orgId, role: 'employee' },
     });
 
     const deptHead = await prisma.user.create({
       data: { email: 'depthead@e2e.test', passwordHash },
     });
-    await prisma.userRoleAssignment.create({
+    await prisma.departmentRoleAssignment.create({
       data: {
         userId: deptHead.id,
         organizationId: orgId,
@@ -80,8 +80,8 @@ describe('Audit Log (e2e)', () => {
     const auditor = await prisma.user.create({
       data: { email: 'auditor@e2e.test', passwordHash },
     });
-    await prisma.userRoleAssignment.create({
-      data: { userId: auditor.id, organizationId: orgId, role: 'auditor', departmentId: null },
+    await prisma.organizationRoleAssignment.create({
+      data: { userId: auditor.id, organizationId: orgId, role: 'auditor' },
     });
 
     await prisma.rolePermission.createMany({

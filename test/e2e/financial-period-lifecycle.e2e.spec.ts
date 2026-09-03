@@ -72,14 +72,14 @@ describe('Financial period lifecycle (e2e)', () => {
     const employee = await prisma.user.create({
       data: { email: 'employee@e2e.test', passwordHash },
     });
-    await prisma.userRoleAssignment.create({
-      data: { userId: employee.id, organizationId: orgId, role: 'employee', departmentId: null },
+    await prisma.organizationRoleAssignment.create({
+      data: { userId: employee.id, organizationId: orgId, role: 'employee' },
     });
 
     const deptHead = await prisma.user.create({
       data: { email: 'depthead@e2e.test', passwordHash },
     });
-    await prisma.userRoleAssignment.create({
+    await prisma.departmentRoleAssignment.create({
       data: {
         userId: deptHead.id,
         organizationId: orgId,
@@ -92,13 +92,8 @@ describe('Financial period lifecycle (e2e)', () => {
       data: { email: 'findir@e2e.test', passwordHash },
     });
     directorId = director.id;
-    await prisma.userRoleAssignment.create({
-      data: {
-        userId: director.id,
-        organizationId: orgId,
-        role: 'finance_director',
-        departmentId: null,
-      },
+    await prisma.organizationRoleAssignment.create({
+      data: { userId: director.id, organizationId: orgId, role: 'finance_director' },
     });
 
     // The audit-trail reader (#8). A distinct role from finance_director on purpose:
@@ -107,8 +102,8 @@ describe('Financial period lifecycle (e2e)', () => {
     const auditor = await prisma.user.create({
       data: { email: 'auditor@e2e.test', passwordHash },
     });
-    await prisma.userRoleAssignment.create({
-      data: { userId: auditor.id, organizationId: orgId, role: 'auditor', departmentId: null },
+    await prisma.organizationRoleAssignment.create({
+      data: { userId: auditor.id, organizationId: orgId, role: 'auditor' },
     });
 
     await prisma.rolePermission.createMany({
