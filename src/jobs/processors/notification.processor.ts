@@ -8,6 +8,7 @@ import {
   EMAIL_PROVIDER,
   EmailProvider,
 } from '../../shared-kernel/notifications/email-provider.port';
+import { USER_ROLE_SERVICE, UserRoleService } from '../../shared-kernel/auth/user-role.port';
 import { Prisma } from '@prisma/client';
 import {
   getSubjectFor,
@@ -29,6 +30,7 @@ export class NotificationProcessor extends WorkerHost {
   constructor(
     private readonly prisma: PrismaService,
     @Inject(EMAIL_PROVIDER) private readonly emailProvider: EmailProvider,
+    @Inject(USER_ROLE_SERVICE) private readonly userRoles: UserRoleService,
   ) {
     super();
   }
@@ -42,9 +44,12 @@ export class NotificationProcessor extends WorkerHost {
       return;
     }
 
-    const roleAssignment = await this.prisma.userRoleAssignment.findFirst({
-      where: { userId: recipientUserId },
-    });
+    // TECH_DEBT #14 — was a direct userRoleAssignment.findFirst(); now uses
+    // the same seam AuthService uses. Any assignment's organizationId is
+    // fine here (matches the original's intent — just attributing the log
+    // row to SOME org this user belongs to), so [0] is fine even though
+    // getRolesForUser can return rows from either table interleaved.
+    const [roleAssignment] = await this.userRoles.getRolesForUser(recipientUserId);
 
     const log = await this.prisma.notificationLog.create({
       data: {
@@ -53,7 +58,7 @@ export class NotificationProcessor extends WorkerHost {
         recipientUserId,
         channel: 'email',
         templateType,
-        templateData: templateData as unknown as Prisma.InputJsonValue, // NEW — persisted now, needed for retry reconstruction
+        templateData: templateData as unknown as Prisma.InputJsonValue,
         status: 'pending',
       },
     });
@@ -84,7 +89,7 @@ export class NotificationProcessor extends WorkerHost {
           `${isLastAttempt ? 'PERMANENTLY FAILED, no more retries' : 'will retry'} — ${(err as Error).message}`,
       );
 
-      throw err; // still rethrown — BullMQ needs this to actually trigger its retry mechanism, unchanged
+      throw err;
     }
   }
 }

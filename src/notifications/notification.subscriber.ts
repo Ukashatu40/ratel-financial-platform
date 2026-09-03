@@ -190,16 +190,25 @@ export class NotificationSubscriber implements OnModuleInit {
     const roles = [...new Set(periodRoles.map((r) => r.role))];
     if (roles.length === 0) return;
 
-    // Scoped to THIS organization's assignments: a finance_director in another org
-    // has no business being told about this org's period changes.
-    const assignments = await this.prisma.userRoleAssignment.findMany({
-      where: { organizationId, role: { in: roles } },
-      select: { userId: true },
-    });
+    // TECH_DEBT #14 — a REVERSE lookup ("which users hold any of these
+    // roles"), not "which roles does this user hold", so USER_ROLE_SERVICE's
+    // shape doesn't fit here. Queried directly across both tables instead;
+    // a single-caller reverse lookup doesn't justify a new port, unlike
+    // ResourceScopeRegistry's genuine multi-provider need.
+    const [departmentAssignments, organizationAssignments] = await Promise.all([
+      this.prisma.departmentRoleAssignment.findMany({
+        where: { organizationId, role: { in: roles } },
+        select: { userId: true },
+      }),
+      this.prisma.organizationRoleAssignment.findMany({
+        where: { organizationId, role: { in: roles } },
+        select: { userId: true },
+      }),
+    ]);
 
-    // Deduplicated: one user holding both period:open and period:close, or the same
-    // role in two departments, must not be emailed twice about one close.
-    const recipientIds = [...new Set(assignments.map((a) => a.userId))];
+    const recipientIds = [
+      ...new Set([...departmentAssignments, ...organizationAssignments].map((a) => a.userId)),
+    ];
     if (recipientIds.length === 0) {
       this.logger.debug(
         `No users hold period permissions in organization ${organizationId} — ` +
