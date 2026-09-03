@@ -427,6 +427,37 @@ consistent with `create()`'s existing semantics elsewhere. Both rewritten integr
 tests pass against real Postgres. Handler-level unit coverage (see #55) additionally
 proves the full orchestration end-to-end at the application layer.
 
+### 57. `CashOutflowHandler` could return organization-wide data to a department-scoped caller with no resolvable department — RESOLVED
+
+**Where:** `CashOutflowHandler.execute()`
+**What it was:** `departmentIds` was computed as `scope === 'department' ? [...] : null`, and
+the branch selecting which SQL to run checked `if (departmentIds && departmentIds.length > 0)`.
+A caller whose scope resolved to `'department'` but who had no resolvable
+`departmentId` on any role assignment (`departmentIds === []`, not `null`) failed that
+condition and fell through to the SAME unfiltered, organization-wide query branch an
+`'organization'`-scoped caller gets — silently returning every department's cash outflow
+to someone whose grant was department-scoped.
+
+**Found while writing unit test coverage for this handler** (part of closing the
+zero-coverage gap left by `cash-outflow`/`project-spending`/`payroll-summary` never having
+any tests at all), not by design review or a report. Every sibling handler in this module
+(`DepartmentSpendingSummaryHandler`, `PendingDepartmentSpendingHandler`,
+`ExpenseAdjustmentsSummaryHandler`, etc.) checks `scope === 'department'` directly and
+always applies the filter regardless of the resulting array's length — this was the one
+handler with the `departmentIds.length > 0` fallthrough, introduced because it branches
+between two raw SQL templates rather than building a single Prisma `where` object like
+every other handler here.
+
+**Fixed by failing closed**, mirroring the existing `scope === null` guard at the top of
+the method: `if (scope === 'department' && departmentIds!.length === 0) return [];` before
+either SQL branch runs. No behavior change to any path that was already correct — the
+`departmentIds.length > 0` branch condition is now provably always true whenever reached
+for `'department'` scope, left as-is rather than simplified, to keep the fix minimal.
+
+**Coverage:** the test that previously documented the fallthrough as current (but flagged)
+behavior now asserts the fixed behavior instead — empty result, `$queryRaw` never called —
+for a `department_head` role assignment with `departmentId: null`.
+
 ### 9. ~~Failed event delivery to one subscriber is only logged, not retried~~ — RESOLVED
 **Why this mattered more than the original wording suggested:** `AuditSubscriber`
 is registered globally, so it is the only thing writing the audit trail, for
