@@ -13,6 +13,14 @@ import { CashOutflowQuery } from '../../application/queries/cash-outflow.query';
 import { ProjectSpendingQuery } from '../../application/queries/project-spending.query';
 import { PayrollSummaryQuery } from '../../application/queries/payroll-summary.query';
 import { DateRangeDto } from '../dto/date-range.dto';
+import { PendingDepartmentSpendingHandler } from '../../application/handlers/pending-department-spending.handler';
+import { PendingDepartmentSpendingQuery } from '../../application/queries/pending-department-spending.query';
+import { ExpenseStatusBreakdownHandler } from '../../application/handlers/expense-status-breakdown.handler';
+import { ExpenseStatusBreakdownQuery } from '../../application/queries/expense-status-breakdown.query';
+import { ExpenseAdjustmentsSummaryHandler } from '../../application/handlers/expense-adjustments-summary.handler';
+import { ExpenseAdjustmentsSummaryQuery } from '../../application/queries/expense-adjustments-summary.query';
+import { RequesterSpendingHandler } from '../../application/handlers/requester-spending.handler';
+import { RequesterSpendingQuery } from '../../application/queries/requester-spending.query';
 import { TopNDto } from '../dto/top-n.dto';
 import { JwtAuthGuard } from '../../../auth/authentication/jwt-auth.guard';
 import { PermissionGuard } from '../../../auth/authorization/permission.guard';
@@ -33,6 +41,10 @@ export class ReportsController {
     private readonly cashOutflow: CashOutflowHandler,
     private readonly projectSpending: ProjectSpendingHandler,
     private readonly payrollSummary: PayrollSummaryHandler,
+    private readonly pendingDepartmentSpending: PendingDepartmentSpendingHandler,
+    private readonly expenseStatusBreakdown: ExpenseStatusBreakdownHandler,
+    private readonly expenseAdjustmentsSummary: ExpenseAdjustmentsSummaryHandler,
+    private readonly requesterSpending: RequesterSpendingHandler,
   ) {}
 
   @ApiOperation({ summary: 'Total approved spending grouped by department, within a date range' })
@@ -86,6 +98,60 @@ export class ReportsController {
   async getPayrollSummary(@Query() dto: DateRangeDto, @CurrentUser() user: UserPrincipal) {
     return this.payrollSummary.execute(
       new PayrollSummaryQuery(user.organizationId, new Date(dto.from), new Date(dto.to)),
+    );
+  }
+
+  @ApiOperation({
+    summary:
+      'Outstanding spend awaiting approval, grouped by department — not yet approved, so not counted as spent elsewhere',
+  })
+  @RequirePermission('report:view')
+  @Get('pending-department-spending')
+  async getPendingDepartmentSpending(
+    @Query() dto: DateRangeDto,
+    @CurrentUser() user: UserPrincipal,
+  ) {
+    return this.pendingDepartmentSpending.execute(
+      new PendingDepartmentSpendingQuery(user, new Date(dto.from), new Date(dto.to)),
+    );
+  }
+
+  @ApiOperation({
+    summary:
+      'Full expense funnel by status (draft through closed) within a date range — not just approved spend',
+  })
+  @RequirePermission('report:view')
+  @Get('expense-status-breakdown')
+  async getExpenseStatusBreakdown(@Query() dto: DateRangeDto, @CurrentUser() user: UserPrincipal) {
+    return this.expenseStatusBreakdown.execute(
+      new ExpenseStatusBreakdownQuery(user, new Date(dto.from), new Date(dto.to)),
+    );
+  }
+
+  @ApiOperation({
+    summary:
+      'Approved expense adjustments (corrections/reversals) by department — net signed total plus a count, since offsetting adjustments net to zero',
+  })
+  @RequirePermission('report:view')
+  @Get('expense-adjustments-summary')
+  async getExpenseAdjustmentsSummary(
+    @Query() dto: DateRangeDto,
+    @CurrentUser() user: UserPrincipal,
+  ) {
+    return this.expenseAdjustmentsSummary.execute(
+      new ExpenseAdjustmentsSummaryQuery(user, new Date(dto.from), new Date(dto.to)),
+    );
+  }
+
+  @ApiOperation({
+    summary:
+      'Total approved spending grouped by requester, resolved to name (or email if unlinked)',
+  })
+  @RequirePermission('report:view')
+  @Get('requester-spending')
+  async getRequesterSpending(@Query() dto: DateRangeDto, @CurrentUser() user: UserPrincipal) {
+    return this.requesterSpending.execute(
+      new RequesterSpendingQuery(user, new Date(dto.from), new Date(dto.to)),
     );
   }
 }

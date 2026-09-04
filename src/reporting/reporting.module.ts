@@ -8,6 +8,10 @@ import { ReportsController } from './presentation/controllers/reports.controller
 import { CashOutflowHandler } from './application/handlers/cash-outflow.handler';
 import { ProjectSpendingHandler } from './application/handlers/project-spending.handler';
 import { PayrollSummaryHandler } from './application/handlers/payroll-summary.handler';
+import { PendingDepartmentSpendingHandler } from './application/handlers/pending-department-spending.handler';
+import { ExpenseStatusBreakdownHandler } from './application/handlers/expense-status-breakdown.handler';
+import { ExpenseAdjustmentsSummaryHandler } from './application/handlers/expense-adjustments-summary.handler';
+import { RequesterSpendingHandler } from './application/handlers/requester-spending.handler';
 
 @Module({
   controllers: [ReportsController],
@@ -18,7 +22,11 @@ import { PayrollSummaryHandler } from './application/handlers/payroll-summary.ha
     TopVendorsHandler,
     CashOutflowHandler,
     ProjectSpendingHandler,
-    PayrollSummaryHandler, // <-- add
+    PayrollSummaryHandler,
+    PendingDepartmentSpendingHandler,
+    ExpenseStatusBreakdownHandler,
+    ExpenseAdjustmentsSummaryHandler,
+    RequesterSpendingHandler,
   ],
 })
 export class ReportingModule {}
