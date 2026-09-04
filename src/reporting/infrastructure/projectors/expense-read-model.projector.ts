@@ -31,11 +31,7 @@ export class ExpenseReadModelProjector implements OnModuleInit {
 
   onModuleInit(): void {
     PROJECTED_EVENT_TYPES.forEach((type) =>
-      this.dispatcher.register(
-        type,
-        (e) => this.projectFromSource(e),
-        'ExpenseReadModelProjector',
-      ),
+      this.dispatcher.register(type, (e) => this.projectFromSource(e), 'ExpenseReadModelProjector'),
     );
   }
 
@@ -69,6 +65,7 @@ export class ExpenseReadModelProjector implements OnModuleInit {
       create: {
         expenseId: expense.id,
         organizationId: expense.organizationId,
+        sourceActorId: expense.sourceActorId,
         departmentId: expense.departmentId,
         departmentName: department?.name ?? 'Unknown',
         categoryId: expense.categoryId,
@@ -88,6 +85,7 @@ export class ExpenseReadModelProjector implements OnModuleInit {
       update: {
         // Full re-sync, not just status — a category/vendor/amount could
         // theoretically have changed too (e.g. draft edits before submit).
+        sourceActorId: expense.sourceActorId,
         departmentName: department?.name ?? 'Unknown',
         categoryName: category?.name ?? 'Unknown',
         vendorName: vendor?.name ?? null,
