@@ -496,6 +496,35 @@ produces an identical chain for its negation. Plus 2 e2e tests in
 correctly requires BOTH department_head and finance_director approval in sequence before
 appearing in the report, and a pending (unapproved) adjustment is correctly excluded.
 
+### 59. First payroll e2e coverage — RESOLVED
+
+**What it was:** No payroll e2e spec existed anywhere in the repo (flagged explicitly
+in `notification.subscriber.spec.ts`'s own comment when `PayrollRunRejected` was
+tested at the unit level instead). Standing one up needed employees, salary
+structures, and — the genuinely new part — real field encryption exercised end to
+end, since every other e2e spec either doesn't touch encrypted columns or the
+integration specs substitute `TestEncryptionService` via explicit DI override.
+`createTestApp()` boots the real `AppModule` with no such override, so this is the
+first e2e spec where `AesGcmEnvelopeEncryptionService` genuinely encrypts and
+decrypts `SalaryStructure.encryptedLineItems` and `Payslip.encryptedDetail` against
+a real KEK (`env-setup.ts`'s fixed deterministic test key) — confirmed working with
+no additional setup required.
+
+**Coverage:** `test/e2e/payroll-lifecycle.e2e.spec.ts` — the full lifecycle (employee
+→ salary structure → run → payslip → submit → approve → process), including a real
+encrypt-then-decrypt round trip asserted on both the salary structure's line items
+and the payslip's gross/net pay; the `approved → processing` audit diff (#52) proven
+through the real HTTP → outbox → `AuditSubscriber` path for the first time (previously
+only proven at the integration layer); 403 controls for both `payroll:create` and
+`payroll:approve`; and the `PayrollRunAlreadyExistsError` 409 for a duplicate
+org+month run.
+
+**Deliberately deferred, not forgotten:** no test for `NoOpenPeriodError`. Covering it
+would mean granting `period:close` and driving a real close first, which
+`financial-period-lifecycle.e2e.spec.ts` already covers thoroughly — duplicating that
+setup here just to prove `CreatePayrollRunHandler` delegates correctly to the same
+port didn't seem worth the fixture complexity for this first pass.
+
 ### 9. ~~Failed event delivery to one subscriber is only logged, not retried~~ — RESOLVED
 **Why this mattered more than the original wording suggested:** `AuditSubscriber`
 is registered globally, so it is the only thing writing the audit trail, for
