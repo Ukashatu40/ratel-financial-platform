@@ -546,6 +546,7 @@ model ExpenseReadModel {
   amountMinorUnits BigInt   @map("amount_minor_units") // SIGNED — adjustments carry negative values,
                                                          // so summing this column naturally nets out
                                                          // reversals against originals, no special-casing
+  sourceActorId    String   @default("unknown") @map("source_actor_id")
   currency         String   @db.Char(3)
   status           String
   expenseDate      DateTime @db.Date @map("expense_date")
@@ -557,6 +558,7 @@ model ExpenseReadModel {
   @@index([organizationId, departmentId, status, expenseDate])
   @@index([organizationId, categoryId, status, expenseDate])
   @@index([organizationId, vendorId, status, expenseDate])
+  @@index([organizationId, sourceActorId, status, expenseDate])
   @@map("expense_read_model")
 }
 
