@@ -22,8 +22,23 @@ export class ExpenseApprovalPolicy implements ApprovalPolicy {
   // the threshold in naira precisely so the same slip cannot recur silently.
   private static readonly FINANCE_DIRECTOR_THRESHOLD_MINOR_UNITS = 500_000_00n;
 
+  /**
+   * TECH_DEBT #58 — this policy is reused for BOTH ordinary expenses (always
+   * positive) and adjustments (Expense.createAdjustment() sets amount to
+   * original.amount.negate(), always negative), via the same APPROVAL_POLICY
+   * port. The comparison previously used the signed value directly, so any
+   * negative amount — i.e. every adjustment, regardless of size — was always
+   * less than the positive threshold and silently NEVER escalated to
+   * finance_director. ExpenseAdjustmentApprovalPolicy (a different, sibling
+   * policy that decides only WHETHER an adjustment needs approval at all,
+   * not the chain shape) already took the absolute value; this is the
+   * matching fix for the file that decides the chain itself.
+   */
   resolveChain(item: Approvable): ApprovalChain {
-    if (item.amountMinorUnits < ExpenseApprovalPolicy.FINANCE_DIRECTOR_THRESHOLD_MINOR_UNITS) {
+    const absoluteAmount =
+      item.amountMinorUnits < 0n ? -item.amountMinorUnits : item.amountMinorUnits;
+
+    if (absoluteAmount < ExpenseApprovalPolicy.FINANCE_DIRECTOR_THRESHOLD_MINOR_UNITS) {
       return ApprovalChain.of([
         { order: 1, requiredRole: 'department_head', requiredScope: 'department' },
       ]);
