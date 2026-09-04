@@ -450,13 +450,51 @@ every other handler here.
 
 **Fixed by failing closed**, mirroring the existing `scope === null` guard at the top of
 the method: `if (scope === 'department' && departmentIds!.length === 0) return [];` before
-either SQL branch runs. No behavior change to any path that was already correct — the
-`departmentIds.length > 0` branch condition is now provably always true whenever reached
-for `'department'` scope, left as-is rather than simplified, to keep the fix minimal.
+either SQL branch runs.
 
-**Coverage:** the test that previously documented the fallthrough as current (but flagged)
-behavior now asserts the fixed behavior instead — empty result, `$queryRaw` never called —
-for a `department_head` role assignment with `departmentId: null`.
+**Coverage:** unit test asserting empty result + `$queryRaw` never called for a
+`department_head` role assignment with `departmentId: null`.
+
+### 58. `ExpenseApprovalPolicy.resolveChain()` silently never escalated adjustments to finance_director, regardless of size — RESOLVED
+
+**Where:** `ExpenseApprovalPolicy.resolveChain()`
+**What it was:** `Expense.createAdjustment()` sets an adjustment's `amount` to
+`original.amount.negate()` — always negative. `resolveChain()`'s threshold check was a bare
+`item.amountMinorUnits < FINANCE_DIRECTOR_THRESHOLD_MINOR_UNITS`. Since any negative number
+is always less than a positive threshold, **every adjustment resolved to the single-step
+`department_head`-only chain, at any magnitude** — a ₦10,000,000 reversal required exactly
+the same single approval as a ₦100 one. `ExpenseAdjustmentApprovalPolicy` (the sibling
+policy deciding only WHETHER an adjustment needs approval at all) already correctly took
+the absolute value; `resolveChain()`, which decides the chain SHAPE, never got the matching
+treatment. Same policy object is used for ordinary expenses (always positive, unaffected)
+and adjustments (always negative, silently broken) via the same `APPROVAL_POLICY` port.
+
+**Found while writing e2e coverage for the new `expense-adjustments-summary` report** — a
+finance_director approving a large adjustment as its (intended) second approval step got
+`ApproverRoleMismatchError` (403), because the chain had already resolved to one step and
+completed on the department_head's approval alone. Not found by design review; found
+because the report needed a real two-approver adjustment to test against.
+
+**Fixed** by taking the absolute value before comparing, mirroring
+`ExpenseAdjustmentApprovalPolicy`'s existing pattern exactly:
+```ts
+const absoluteAmount = item.amountMinorUnits < 0n ? -item.amountMinorUnits : item.amountMinorUnits;
+```
+
+**Same shape as #10, different axis.** #10 was a threshold wrong by magnitude (missing a
+digit); this is a threshold wrong by sign (never handling negative input) — both are
+"a comparison silently wrong for an input shape nothing had tested." `resolveChain()`'s
+existing test file, extended for #10, used exclusively positive amounts; adjustments were
+a second untested input shape for the same function.
+
+**Coverage:** 5 new unit tests in the existing `expense-approval.policy.spec.ts` — a large
+negative amount now escalates to the two-step chain, a small negative amount does not, the
+threshold boundary holds for negative values too (at-threshold and one-kobo-under), and a
+direct symmetry check proving every positive-amount test case elsewhere in the file
+produces an identical chain for its negation. Plus 2 e2e tests in
+`reporting.e2e.spec.ts`'s new `expense-adjustments-summary` block: a large adjustment now
+correctly requires BOTH department_head and finance_director approval in sequence before
+appearing in the report, and a pending (unapproved) adjustment is correctly excluded.
 
 ### 9. ~~Failed event delivery to one subscriber is only logged, not retried~~ — RESOLVED
 **Why this mattered more than the original wording suggested:** `AuditSubscriber`
