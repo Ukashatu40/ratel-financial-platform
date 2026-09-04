@@ -99,4 +99,53 @@ describe('ExpenseApprovalPolicy', () => {
       }
     });
   });
+
+  describe('negative amounts — TECH_DEBT #58 (adjustments carry a negated Money value)', () => {
+    // Expense.createAdjustment() sets amount to original.amount.negate(), so
+    // every adjustment reaches this policy with a NEGATIVE amountMinorUnits.
+    // The bare `<` comparison previously meant any negative value was always
+    // below the positive threshold, so a large reversal silently never
+    // escalated to finance_director.
+
+    it('escalates a large NEGATIVE amount exactly the same as its positive counterpart', () => {
+      // The regression case itself — a -₦1,500,000 reversal must escalate,
+      // not silently resolve to department_head alone.
+      const chain = policy.resolveChain(expenseOf(-naira(1_500_000n)));
+      expect(chain.length).toBe(2);
+      expect(chain.toArray()).toEqual([DEPARTMENT_HEAD_STEP, FINANCE_DIRECTOR_STEP]);
+    });
+
+    it('does NOT escalate a small negative amount, matching its positive counterpart', () => {
+      const chain = policy.resolveChain(expenseOf(-naira(100_000n)));
+      expect(chain.length).toBe(1);
+      expect(chain.toArray()).toEqual([DEPARTMENT_HEAD_STEP]);
+    });
+
+    it('escalates EXACTLY AT the threshold for a negative amount too', () => {
+      const chain = policy.resolveChain(expenseOf(-naira(500_000n)));
+      expect(chain.length).toBe(2);
+    });
+
+    it('does not escalate one kobo below the threshold, negative side', () => {
+      const chain = policy.resolveChain(expenseOf(-(naira(500_000n) - 1n)));
+      expect(chain.length).toBe(1);
+    });
+
+    it('produces the SAME chain for a positive amount and its negation, at every magnitude tested elsewhere', () => {
+      // A direct symmetry check across the same amounts this file already
+      // exercises for the positive case, so the fix is proven equivalent
+      // rather than merely non-crashing.
+      for (const amount of [
+        0n,
+        naira(1_000n),
+        naira(499_999n),
+        naira(500_000n),
+        naira(10_000_000n),
+      ]) {
+        const positiveChain = policy.resolveChain(expenseOf(amount)).toArray();
+        const negativeChain = policy.resolveChain(expenseOf(-amount)).toArray();
+        expect(negativeChain).toEqual(positiveChain);
+      }
+    });
+  });
 });
