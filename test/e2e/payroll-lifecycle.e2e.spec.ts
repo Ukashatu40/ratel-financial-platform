@@ -87,13 +87,27 @@ describe('Payroll lifecycle (e2e)', () => {
       data: { userId: employee.id, organizationId: orgId, role: 'employee' },
     });
 
-    const login = async (email: string) =>
-      (
-        await request(server)
-          .post('/api/v1/auth/login')
-          .send({ email, password: 'E2ePassword!23' })
-          .expect(201)
-      ).body.accessToken;
+    // Phase 9.2 — payroll:view_sensitive now requires a recent step-up
+    // re-authentication in addition to the permission grant. Every token
+    // is stepped-up unconditionally, not just the ones used against the
+    // GET endpoints that actually require it: step-up is purely additive
+    // (only checked on routes that opt in via `requiresStepUp`), so this
+    // can't change behaviour for the create/submit/approve/process calls
+    // elsewhere in this file.
+    const login = async (email: string) => {
+      const loginRes = await request(server)
+        .post('/api/v1/auth/login')
+        .send({ email, password: 'E2ePassword!23' })
+        .expect(201);
+
+      const stepUpRes = await request(server)
+        .post('/api/v1/auth/step-up')
+        .set('Authorization', `Bearer ${loginRes.body.accessToken}`)
+        .send({ password: 'E2ePassword!23' })
+        .expect(201);
+
+      return stepUpRes.body.accessToken;
+    };
 
     payrollAdminToken = await login('payrolladmin@e2e.test');
     financeDirectorToken = await login('findir@e2e.test');
@@ -193,6 +207,7 @@ describe('Payroll lifecycle (e2e)', () => {
 
     // Real encryption round trip for the payslip's netPay too: single
     // allowance, no deductions, noOpTaxComputation -> net === gross.
+    // payrollAdminToken is already stepped-up (see `login` in beforeEach).
     const runDetailRes = await request(server)
       .get(`/api/v1/payroll-runs/${runId}`)
       .set('Authorization', `Bearer ${payrollAdminToken}`)

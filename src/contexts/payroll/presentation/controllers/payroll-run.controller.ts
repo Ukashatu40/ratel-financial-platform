@@ -63,14 +63,16 @@ export class PayrollRunController {
   }
 
   @ApiOperation({ summary: 'Get a single payroll run by ID' })
-  @RequirePermission('payroll:view_sensitive')
+  // Phase 9.2 — step-up required: this is salary/payslip data.
+  @RequirePermission('payroll:view_sensitive', { requiresStepUp: true })
   @Get(':id')
   async getById(@Param('id') id: string, @CurrentUser() user: UserPrincipal) {
     return this.getPayrollRunById.execute(new GetPayrollRunByIdQuery(id, user.organizationId));
   }
 
   @ApiOperation({ summary: 'List payroll runs for the organization, with optional pagination' })
-  @RequirePermission('payroll:view_sensitive')
+  // Phase 9.2 — step-up required: this is salary/payslip data.
+  @RequirePermission('payroll:view_sensitive', { requiresStepUp: true })
   @Get()
   async list(@Query() dto: ListPayrollRunsDto, @CurrentUser() user: UserPrincipal) {
     return this.listPayrollRuns.execute(

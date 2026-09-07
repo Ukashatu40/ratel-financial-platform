@@ -47,7 +47,17 @@ export class FinancialPeriodController {
     );
   }
 
-  @RequirePermission('period:close')
+  // Phase 9.2 — one of the two actions explicitly named as needing
+  // step-up re-authentication, independent of MFA. Deliberately NOT
+  // applied to open()/reopen() below, even though reopen shares the
+  // period:open permission with open() — Phase 9.2 names only
+  // payroll:view_sensitive and period:close; expanding this to reopen
+  // wasn't asked for and would also gate ordinary period-open traffic
+  // since both routes carry the same permission string (requiresStepUp is
+  // checked per-ROUTE metadata, so it COULD be added to reopen alone
+  // without affecting open() — left as a deliberate scope call, not an
+  // oversight, should reopen ever warrant the same treatment).
+  @RequirePermission('period:close', { requiresStepUp: true })
   @Post(':id/close')
   async close(@Param('id') id: string, @CurrentUser() user: UserPrincipal): Promise<void> {
     await this.closePeriod.execute(new ClosePeriodCommand(user.organizationId, id, user.id));

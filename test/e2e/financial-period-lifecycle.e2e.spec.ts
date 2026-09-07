@@ -121,12 +121,28 @@ describe('Financial period lifecycle (e2e)', () => {
     });
   });
 
+  // Phase 9.2 — period:close now requires a recent step-up
+  // re-authentication in addition to the permission grant. Every token
+  // this helper returns is stepped-up unconditionally rather than only
+  // for calls that actually hit /close: step-up is purely additive (it's
+  // only even checked on routes that opt in via `requiresStepUp`), so
+  // this can't change behaviour for this file's many other calls
+  // (open/reopen/list/get), and it's far less error-prone across a file
+  // this size than auditing every call site individually for which ones
+  // precede a /close.
   async function loginAs(email: string): Promise<string> {
-    const res = await request(server)
+    const loginRes = await request(server)
       .post('/api/v1/auth/login')
       .send({ email, password: 'E2ePassword!23' })
       .expect(201);
-    return res.body.accessToken;
+
+    const stepUpRes = await request(server)
+      .post('/api/v1/auth/step-up')
+      .set('Authorization', `Bearer ${loginRes.body.accessToken}`)
+      .send({ password: 'E2ePassword!23' })
+      .expect(201);
+
+    return stepUpRes.body.accessToken;
   }
 
   const waitFor = async (

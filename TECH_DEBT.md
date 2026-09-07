@@ -93,6 +93,312 @@ built rather than left implicit — this is a design gap to revisit
 deliberately when multi-tenancy work actually begins, not a bug to patch
 reactively later.
 
+### 60. ~~No rate limiting existed anywhere — Phase 9.6 was designed but never built, and never logged here~~ — RESOLVED
+**What it was:** Phase 9.6 (`PHASES.md`) specifies Redis token-bucket rate
+limiting, called out as especially needed on `/auth/login`/`/auth/refresh`
+("credential-stuffing targets those disproportionately") and on
+`/reports/*` (bulk-exfiltration risk, distinct from single-resource
+access). None of it existed: `@nestjs/throttler` wasn't even a dependency,
+`grep` for "throttl"/"rate.?limit" across `src/` returned nothing, and —
+the part that made this worse than an open TODO — **it was never recorded
+in this file either**, so nothing marked it as a known gap. Found during a
+gap analysis against `PHASES.md` §9, not by an incident.
+
+**Fixed.** New `src/rate-limit/` module: a single named `'default'`
+throttler, applied globally via `APP_GUARD`, backed by
+`@nest-lab/throttler-storage-redis` (own `ioredis` connection, `.on('error',
+...)` handled per gotcha #2/#19 — logged via `Logger.warn`, not swallowed,
+since this connection sits on the request path for nearly every endpoint).
+`AuthController.login()`/`refresh()` and all of `ReportsController` override
+it with stricter limits via `@Throttle({ default: {...} })`.
+
+**Deliberately one named throttler, not three.** `ThrottlerGuard` runs
+EVERY configured named throttler against EVERY route unless explicitly
+`@SkipThrottle()`-ed — its Redis bucket key is per-handler
+(`ClassName-HandlerName-throttlerName-tracker`), but the LIMIT enforced on
+an unrelated route would still be whichever named throttler's own value.
+Defining separate `'auth'`/`'reports'` throttlers globally would have
+silently capped every OTHER endpoint at those tighter limits too, unless
+`@SkipThrottle()` were sprinkled across every controller that isn't auth
+or reports. A single throttler with per-route `@Throttle()` overrides
+avoids that entirely.
+
+**The auth/reports override values are read from `process.env` directly,
+not via `ConfigService`** — documented inline in
+`rate-limit.constants.ts`, not a shortcut taken silently: `@Throttle()`'s
+route-level override is a decorator, evaluated at class-definition time,
+before Nest's DI container exists to inject `ConfigService` into it.
+`@nestjs/throttler` supports a `Resolvable<number>` (a plain function,
+called per-request) for exactly this case. Reading `process.env` directly
+there is safe, not a second source of truth: `validateEnv()`
+(`env.schema.ts`) already ran at boot and would have exited the process if
+these vars were malformed, so by request time `process.env` is guaranteed
+to satisfy the same schema the `'default'` throttler's ConfigService-backed
+factory reads. The numeric defaults themselves live in ONE place
+(`RATE_LIMIT_DEFAULTS`), imported by `env.schema.ts`'s `.default(...)`
+calls rather than restated — avoiding the #22/#37/#47 drift risk this
+codebase repeatedly guards against elsewhere.
+
+**A real connection-lifecycle bug, caught by actually running the e2e
+suite, not by review.** The first version constructed its own `Redis`
+client and passed the live instance into `ThrottlerStorageRedisService`.
+That class only disconnects its client in `onModuleDestroy()` when it
+constructed the client ITSELF (from `RedisOptions`/a URL) — its
+`disconnectRequired` flag stays unset when handed a pre-built instance. So
+the connection was never closed on `app.close()`, surfacing as e2e's "Jest
+did not exit one second after the test run" warning. Fixed by passing
+`RedisOptions` instead and attaching the `.on('error', ...)` handler to the
+resulting `storage.redis` property afterward — `disconnectRequired` is
+then set correctly, and Nest calls `onModuleDestroy()` on whatever
+`storage` instance `ThrottlerModule`'s factory returns regardless of how it
+was constructed, so the connection now closes cleanly. Confirmed by
+re-running the full e2e suite: the warning is gone.
+
+**Auth/reports limit values are code constants (env-overridable), not
+confirmed business figures** — the same honest caveat #10 records for the
+approval thresholds: 5 login attempts / 15 minutes and 20 report calls /
+minute are defensible, industry-typical defaults, not numbers Ratel-Plus
+specified. **To close:** confirm with the business if a different figure
+is wanted; it's a one-line env var change either way
+(`RATE_LIMIT_AUTH_LIMIT` etc.), no code change required.
+
+**Deliberately per-IP everywhere, not per-authenticated-user on general
+endpoints, even though Phase 9.6's wording leads with "per-user for
+authenticated endpoints."** `ThrottlerGuard` is bound globally via
+`APP_GUARD`, which Nest runs BEFORE any controller-level guard —
+including `JwtAuthGuard`, which is what actually populates
+`request.user`. So a tracker keyed on `request.user.id` would see
+`undefined` for every request, silently degrading to a shared bucket for
+all authenticated traffic rather than per-user isolation. Making the
+throttler genuinely user-aware would mean either making `JwtAuthGuard`
+itself global (a real architectural change to the auth model, out of
+scope here and exactly the kind of change CLAUDE.md says to ask before
+making) or re-binding the throttler per-controller after `JwtAuthGuard`
+in every protected controller's `@UseGuards()` array (touches every
+controller for a refinement, not the gap itself). Per-IP still delivers
+the two properties Phase 9.6 actually named as the reason for stricter
+auth/reports limits — bounding credential-stuffing attempts and bulk
+export/scrape volume from a single source — so it closes the real gap
+without the architectural change. **To close further:** revisit if/when
+`JwtAuthGuard` ever becomes a global guard for other reasons.
+
+**IP is read from the raw socket (`req.ip`, Fastify's default), not from
+`X-Forwarded-For`.** Correct for today (no reverse proxy/load balancer in
+front of this app yet — Phase 10 hosting is undecided, per #45's own
+note). **To close:** once Phase 10 picks a deployment topology, configure
+Fastify's `trustProxy` to trust only the actual proxy hop and read the
+real client IP from the forwarded header — enabling `trustProxy` naively
+before that decision is made would let a client trivially spoof its
+tracked identity via a self-supplied header, and NOT enabling it once
+behind a real proxy would make every user behind that proxy share one
+bucket. Neither is done blindly here; both need the Phase 10 answer first.
+
+**Verification:** 7 unit tests for the `process.env` parsing helper
+(`rate-limit.constants.spec.ts`) — the only place that logic is exercised,
+since the controllers only pass the functions by reference, never call
+them at decoration time. One e2e test
+(`rate-limiting.e2e.spec.ts`) proves the guard fires over real HTTP against
+real Redis: a burst against a per-file-lowered auth limit produces a 429
+with a `Retry-After` header and an RFC 7807 body, and any non-429 response
+in the same burst is still a genuine 401, not something the guard let
+through malformed. That spec's assertions are deliberately written to hold
+regardless of leftover Redis state from earlier spec files in the same
+run (every e2e file shares one Redis instance for the whole suite,
+env-setup.ts sets a generous limit for everyone else specifically so their
+`loginAs()` calls never trip this), and its own block window is kept short
+(2s vs. production's 15 minutes) with a bounded wait in `afterAll` so it
+can't bleed into the next spec file's logins. Manually verified against a
+live `docker compose up` stack per this project's standing bar: 5
+consecutive bad-credential login attempts returned 401, the 6th onward
+returned 429 with `Retry-After: 893` and a `application/problem+json`
+body, `GET /health/liveness` and `POST /auth/refresh` stayed completely
+unaffected (separate per-handler buckets), and the app logged zero Redis
+connection errors on boot.
+
+### 61. ~~No `Idempotency-Key` support existed — Phase 7.5 was designed but never built, and never logged here~~ — RESOLVED
+**What it was:** Same shape of gap as #60, found the same way (a gap
+analysis against `PHASES.md`, not an incident). Phase 7.5 specifies every
+mutating (`POST`/`PATCH`) endpoint should accept an optional
+`Idempotency-Key` header — first request executes and caches its response
+in Redis (~24h TTL), a repeat with the same key replays the cached
+response instead of re-executing. Nothing implemented it, and nothing
+here said so. The concrete risk: a client's network-retry-after-timeout
+on, say, `POST /expenses` had no protection against silently creating a
+second expense for one logical submission.
+
+**Fixed.** New `src/idempotency/` module: a global `IdempotencyInterceptor`
+(bound via `APP_INTERCEPTOR`, same "no controller needs to opt in"
+reasoning as #40's `PermissionGuard` and #60's `ThrottlerGuard`), backed by
+`IdempotencyStoreService` — its own dedicated `ioredis` connection,
+`.on('error', ...)` handled and logged per gotcha #2/#19, disconnected in
+`onModuleDestroy()` (learned from #60's leak, done right the first time
+here).
+
+**Deliberately a no-op for the overwhelming majority of requests.** The
+interceptor checks method (`POST`/`PATCH` only) and header presence before
+touching Redis at all — every `GET`/`DELETE` and every mutating request
+that doesn't send the header costs nothing. "Accepts" (Phase 7.5's word) is
+opt-in support, not a requirement; nothing forces a caller to send the
+header, and the existing e2e/integration suites needed zero changes as a
+result — confirmed by running them, not assumed.
+
+**Claiming is atomic (`SET key IN_PROGRESS PX <lockTtl> NX`), not a
+read-then-write.** A second request with the same key while the first is
+still executing gets a specific `409 idempotency-key-in-progress`
+(`IdempotencyKeyInProgressError`), not silently executed a second time in
+parallel — the exact TOCTOU race a naive "check cache, then execute" design
+would reintroduce. Verified concurrently, not just reasoned about: an e2e
+test and a manual two-`curl`-processes-launched-together check against a
+live server both confirm exactly one request wins the claim (201) and the
+other gets 409, with exactly one database row created either way.
+
+**Deliberately caches only successful (2xx) responses, not failures.** The
+harm this feature protects against — a retry double-creating a resource —
+is a success-path problem only; a failed request created nothing to
+duplicate, and a genuinely-failing mutation (e.g. a closed period) will
+fail the same way again regardless of caching. Caching a failure would also
+mean replaying a *transient* error (a dropped DB connection, say)
+verbatim for the full TTL even after the underlying problem clears. On
+failure the claim is released (`DEL`) instead, so a retry with the same key
+after a real failure gets a fresh, honest attempt — verified by an e2e test
+that fails once (invalid currency) then succeeds on retry with the same
+key, asserting the retry is NOT a replay (no `Idempotency-Replayed`
+header) and exactly one row exists afterward.
+
+**The replayed status code is derived, not assumed.** Nest sets the actual
+response status only after the interceptor's own observable pipeline
+resolves, so "what status will this route return" has to be worked out
+independently: `HTTP_CODE_METADATA` via `Reflector` if `@HttpCode()` is
+present, else Nest's own documented default (201 for `POST`, 200
+otherwise) — confirmed no controller in this codebase overrides it
+(`grep -rn "@HttpCode" src` returns nothing), so today every response this
+caches is a plain 201. Written this way anyway, rather than hardcoding
+201, so a future `@HttpCode()` on some PATCH handler doesn't silently
+replay the wrong status.
+
+**Keys are scoped by handler and caller, not global.** The Redis key is
+`idempotency:{Controller}.{handler}:{userId-or-ip}:{raw key}` — per-handler
+so the same key string used against two different endpoints can't collide
+(mirrors `ThrottlerGuard`'s own bucket-key shape from #60), and per-caller
+so two different users choosing the same key value can't collide either.
+Reading `request.user` here is safe in a way #60's tracker couldn't be:
+Nest runs every Guard (including `JwtAuthGuard`, which sets `request.user`)
+before any Interceptor runs, as a strict phase, regardless of
+global-vs-controller registration — unlike two Guards racing each other on
+registration order, which is exactly what stopped #60's throttler from
+being user-aware.
+
+**Verification:** e2e-only (`test/e2e/idempotency.e2e.spec.ts`, 5 tests) —
+matching this codebase's own established precedent that Guard/Interceptor-
+level mechanisms (`PermissionGuard`, `ThrottlerGuard`) get proven over real
+HTTP against real Redis rather than unit-tested with mocked
+`ExecutionContext`s, since the thing actually worth proving is the real
+wiring, not a re-implementation of Nest's own interfaces. Covers: a
+same-key retry replays byte-identically and creates no duplicate row; no
+header sent behaves completely normally (two independent expenses); a
+genuine concurrent race produces exactly one 201 and one 409, with exactly
+one row in the database either way; a key over 255 characters is a
+specific 400; and a failed-then-retried request is NOT replayed and
+succeeds fresh. Manually re-verified against a live `docker compose up`
+stack with real seed data and two backgrounded `curl` processes launched
+together: identical outcomes to the e2e suite, including the `psql`-checked
+row counts.
+
+### 62. ~~No MFA-readiness slot and no step-up re-authentication existed — Phase 9.2 was designed but never built, and never logged here~~ — RESOLVED
+**What it was:** Same gap shape as #60/#61, found the same way. Phase 9.2
+specifies two related but distinct things: (a) an `mfaVerifiedAt` claim
+slot in the access token from day one, so wiring real MFA in later is a
+guard-side change, not a token-shape migration; and (b) step-up
+re-authentication — password re-entry within the last N minutes — on
+`payroll:view_sensitive` and `period:close` specifically, *independent of
+whether MFA is ever enabled*. Neither existed, and neither was logged.
+
+**Built as two separate things, deliberately not conflated.** (a)
+`UserPrincipal.mfaVerifiedAt` is a genuinely reserved, unused slot — no
+code path sets it, since no MFA provider exists; it exists purely so a
+later MFA guard has somewhere to read from without a migration. (b)
+`UserPrincipal.stepUpAt` is real and working today: `AuthService.stepUp()`
+(new `POST /auth/step-up`, requires an already-valid access token)
+re-verifies the CURRENT password against a freshly-fetched user row and
+mints a new access token carrying `stepUpAt: Date.now()`, without touching
+the refresh token — this isn't a new login, just a short-lived elevation of
+the already-valid session. `payroll:view_sensitive` (both
+`PayrollRunController` endpoints and `ReportsController.getPayrollSummary`)
+and `period:close` now pass `{ requiresStepUp: true }` to
+`@RequirePermission`, checked by `PermissionGuard` via
+`shared-kernel/auth/step-up.ts`'s `isStepUpFresh()` — a 10-minute window by
+default, configurable via `STEP_UP_WINDOW_MS`.
+
+**Checked LAST, deliberately, not first.** `PermissionGuard.allow()` only
+runs the step-up check once the permission/scope check has already
+decided to authorize the request — a caller who lacks the permission
+entirely still gets the existing "missing permission" message, not a
+step-up prompt for something they couldn't do anyway. `POST /auth/step-up`
+shares the same strict `authThrottle` (#60) as login/refresh: an attacker
+holding a stolen access token but not the password is still running a
+password-guessing attack against it, just a narrower one.
+
+**Scope deliberately limited to exactly what Phase 9.2 names.**
+`period:open`/reopen (#48) intentionally do NOT require step-up, even
+though reopen shares the `period:open` permission string with plain
+open — `requiresStepUp` is checked per-ROUTE metadata (via `Reflector` on
+`context.getHandler()`), so it genuinely could be added to reopen alone
+without touching open, but Phase 9.2 names only `payroll:view_sensitive`
+and `period:close`. Left as a stated, deliberate scope call for reopen
+(arguably just as sensitive as close) rather than a silent omission —
+revisit if the business wants it.
+
+**A real gap found while updating the existing e2e suite, not by design
+review.** `payroll-lifecycle.e2e.spec.ts` and
+`financial-period-lifecycle.e2e.spec.ts` both call the now-protected
+endpoints extensively (payroll run detail, period close ×10+ call sites).
+Rather than audit every call site for which ones precede a protected
+call, both files' shared `login`/`loginAs` helpers were changed to
+step-up unconditionally for every token they return — safe because
+step-up is purely additive (only checked on routes that opt in), so it
+cannot change behaviour for any of these files' many OTHER calls
+(open/reopen/create/submit/approve/process/list/get). Far less
+error-prone across files this size than hand-auditing every call site.
+
+**A real testing lesson, caught by actually running the suite, not
+assumed.** The first version of the new `step-up.e2e.spec.ts` tried to
+prove staleness by overriding `STEP_UP_WINDOW_MS` to a few hundred ms for
+the file (the same per-file `process.env` override trick #60's rate-limit
+suite uses) and waiting past it — and failed: `expected 403, got 201`.
+The two features aren't actually analogous here: #60's auth/reports
+overrides are read via a `Resolvable<number>` function that reads
+`process.env` fresh on every request (necessary because `@Throttle()`
+decorators evaluate before Nest's DI container exists at all), while
+`PermissionGuard.allow()` reads `STEP_UP_WINDOW_MS` through
+`ConfigService`, whose validated snapshot doesn't reflect a late
+`process.env` mutation the same way. Rather than chase the exact
+boot-timing question further, the test was rewritten to forge an
+already-stale token directly — decode a real login token, strip its
+`iat`/`exp`, re-sign it (same test secret, via a standalone `JwtService`)
+with `stepUpAt` set past the REAL 10-minute production default. This
+sidesteps the timing question entirely and is arguably the better test
+regardless: it proves the actual default a deployment would run with,
+not a shortened stand-in that doesn't prove anything about it.
+
+**Verification:** unit tests for the pure `isStepUpFresh()` comparison (6
+cases: undefined, exact moment, exact boundary, one ms past, long past,
+future-dated). E2e (`test/e2e/step-up.e2e.spec.ts`, 6 tests, full 13-suite/
+134-test e2e run green): a plain login token is refused with a message
+naming `POST /auth/step-up`; step-up with the wrong password is a 401 that
+does NOT elevate the original token; a correct step-up mints a fresh token
+that succeeds while the original token remains unelevated; the same
+mechanism gates `payroll:view_sensitive` on a lighter-weight endpoint
+(list, no payroll run fixture needed); a forged past-window token is
+refused; and `period:open` is confirmed completely unaffected. Manually
+verified against a live `docker compose up` stack with real seed data:
+close without step-up → 403 naming the requirement; step-up with the wrong
+password → 401; step-up with the right password → fresh token; close with
+the elevated token → 201, `psql`-confirmed `status: closed`; the identical
+sequence proven again for `payroll:view_sensitive` on
+`GET /payroll-runs`. The manually-closed seed period was reopened via the
+real `POST .../reopen` endpoint afterward, restoring local dev state
+rather than leaving it mutated.
+
 ---
 
 ## Audit Trail
@@ -1944,7 +2250,81 @@ recorded as per-row import failures before ever reaching an HTTP response).
 
 ---
 
-*Last updated: 2026-08-22. Most recently: **closed #51** —
+*Last updated: 2026-09-07. Most recently: **closed #62** — the third and
+last of this batch (#60/#61/#62 all found the same way: a gap analysis
+against `PHASES.md`'s security phases, none previously logged). Phase 9.2
+specifies two separate things: a reserved `mfaVerifiedAt` claim slot for
+real MFA later (built as literally that — an unused field, no code path
+sets it, since no MFA provider exists) and step-up re-authentication —
+password re-entry within 10 minutes — on `payroll:view_sensitive` and
+`period:close` specifically, independent of MFA. The real one:
+`POST /auth/step-up` re-verifies the current password and mints a fresh
+access token carrying `stepUpAt`, without touching the refresh token;
+`PermissionGuard` checks it LAST, only after the permission/scope check
+already authorized the request, so a caller who lacks the permission
+entirely still sees the existing "missing permission" message rather than
+a step-up prompt. Deliberately scoped to exactly what Phase 9.2 names —
+`period:open`/reopen do NOT require it, a stated scope call, not an
+oversight, even though reopen could take it independently since
+`requiresStepUp` is per-route metadata. A real testing lesson along the
+way: the first staleness test tried #60's per-file `process.env` override
+trick and failed (`ConfigService`'s snapshot doesn't reflect a late
+mutation the way #60's request-time `process.env` reads do) — rewritten to
+forge an already-stale token by decoding a real one and re-signing it past
+the REAL 10-minute default, which ended up proving more (the actual
+production value) than a shortened test-only window would have. Manually
+verified against live `docker compose up`, including reopening the
+seed period afterward to restore local dev state.*
+
+*Earlier the same day: **closed #61** — Phase 7.5's
+`Idempotency-Key` support had the identical gap shape as #60: never built,
+never logged. Built as a global `IdempotencyInterceptor`
+(`src/idempotency/`, own Redis connection, disconnected correctly in
+`onModuleDestroy()` from the start — applying #60's just-learned lesson
+rather than repeating it) that's a no-op unless a request is POST/PATCH
+AND sends the header. Claiming is atomic (`SET ... NX`), so a genuine
+concurrent retry with the same key gets a specific 409 rather than
+executing twice — proved with real concurrency, both in an e2e test and
+with two `curl` processes launched together against a live server,
+checking the database row count directly rather than trusting the HTTP
+responses alone. Deliberately caches only 2xx responses, not failures: a
+failed request created nothing to duplicate, and caching a transient
+failure would replay it for the full TTL even after the real problem
+clears — verified by a fail-then-retry-succeeds test asserting the retry
+is a fresh execution, not a replay. The replayed status code is derived
+from `@HttpCode()` metadata (falling back to Nest's own documented
+POST=201/other=200 default) rather than hardcoded, since Nest only sets
+the real status after the interceptor's pipeline has already resolved.*
+
+*Earlier the same day: **closed #60** — Phase 9.6
+rate limiting didn't exist anywhere in the codebase (not even a dependency)
+and, worse, was never logged in this file either — found via a gap
+analysis against `PHASES.md` §9, not an incident. Built as a single global
+`'default'` throttler (`src/rate-limit/`, Redis-backed via
+`@nest-lab/throttler-storage-redis`) with per-route `@Throttle()` overrides
+tightening `/auth/login`, `/auth/refresh`, and all of `/reports/*` —
+deliberately one named throttler rather than three, since `ThrottlerGuard`
+applies every configured named throttler to every route unless skipped,
+and a second/third global throttler would have silently capped unrelated
+endpoints too. A real connection-lifecycle bug was caught by running the
+e2e suite, not by review: the first version left its Redis connection open
+past `app.close()` (visible as "Jest did not exit"), because
+`ThrottlerStorageRedisService` only disconnects a client it constructed
+itself, not one handed to it pre-built — fixed by passing `RedisOptions`
+instead. Two honest gaps recorded rather than silently accepted: the
+tracker is per-IP everywhere (not per-authenticated-user on general
+endpoints), because a user-aware tracker needs `request.user`, which
+`JwtAuthGuard` populates AFTER the global `ThrottlerGuard` already ran —
+fixing that for real means either a global `JwtAuthGuard` or per-controller
+guard reordering, both bigger changes than this gap warranted; and IP is
+read from the raw socket, not `X-Forwarded-For`, correct only until Phase
+10 puts a real proxy in front of this app. Verified at three layers plus a
+live manual run against `docker compose up`: 5 bad-credential logins
+succeed (401), the 6th+ returns 429 with `Retry-After` and an RFC 7807
+body, and unrelated endpoints (health check, the separate `/auth/refresh`
+handler) stay unaffected.*
+
+*Earlier: 2026-08-22 — **closed #51** —
 `CurrencyMismatchError` now extends `DomainError` (500,
 `currency-mismatch`), taking the option #50's audit recommended: keep the
 status honest (a programmer error, not client-caused) but stop discarding

@@ -1,5 +1,7 @@
 // src/reporting/presentation/controllers/reports.controller.ts
 import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
+import { reportsThrottle } from '../../../rate-limit/rate-limit.constants';
 import { DepartmentSpendingSummaryHandler } from '../../application/handlers/department-spending-summary.handler';
 import { TopCategoriesHandler } from '../../application/handlers/top-categories.handler';
 import { TopVendorsHandler } from '../../application/handlers/top-vendors.handler';
@@ -33,6 +35,10 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 @ApiBearerAuth('access-token')
 @Controller({ path: 'reports', version: '1' })
 @UseGuards(JwtAuthGuard, PermissionGuard)
+// Phase 9.6 — stricter per-IP limit than the general 'default' throttle:
+// export/reporting endpoints are a bulk-exfiltration risk distinct from
+// single-resource access, so they get their own tighter ceiling.
+@Throttle({ default: { limit: reportsThrottle.limit, ttl: reportsThrottle.ttl } })
 export class ReportsController {
   constructor(
     private readonly departmentSpendingSummary: DepartmentSpendingSummaryHandler,
@@ -93,7 +99,9 @@ export class ReportsController {
   }
 
   @ApiOperation({ summary: 'Payroll gross/net totals by run month' })
-  @RequirePermission('payroll:view_sensitive') // NOT report:view — payroll stays behind its existing, stricter permission
+  // NOT report:view — payroll stays behind its existing, stricter permission.
+  // Phase 9.2 — step-up required: exporting/viewing salary data.
+  @RequirePermission('payroll:view_sensitive', { requiresStepUp: true })
   @Get('payroll-summary')
   async getPayrollSummary(@Query() dto: DateRangeDto, @CurrentUser() user: UserPrincipal) {
     return this.payrollSummary.execute(
