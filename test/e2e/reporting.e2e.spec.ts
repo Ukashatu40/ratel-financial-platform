@@ -69,7 +69,8 @@ describe('Reporting (e2e)', () => {
         { role: 'department_head', permission: 'report:view', scope: 'department' },
         { role: 'finance_director', permission: 'expense:approve', scope: 'organization' },
         { role: 'finance_director', permission: 'report:view', scope: 'organization' },
-        { role: 'finance_director', permission: 'expense:adjust', scope: 'organization' }, // NEW — needed for the expense-adjustments-summary tests
+        { role: 'finance_director', permission: 'expense:adjust', scope: 'organization' }, // Needed for the expense-adjustments-summary tests
+        { role: 'finance_director', permission: 'payroll:create', scope: 'organization' }, // Needed to create/link an Employee for the requester-spending tests
       ],
     });
 
@@ -725,6 +726,65 @@ describe('Reporting (e2e)', () => {
     it('denies a role without report:view with 403', async () => {
       await request(server)
         .get('/api/v1/reports/expense-adjustments-summary?from=2026-08-01&to=2026-08-31')
+        .set('Authorization', `Bearer ${employeeAToken}`)
+        .expect(403);
+    });
+  });
+
+  describe('requester-spending', () => {
+    it('resolves requesterName to the linked Employee.fullName when a link exists', async () => {
+      const prisma = getE2eDbClient();
+      const employeeAUser = await prisma.user.findUniqueOrThrow({
+        where: { email: 'ea@e2e.test' },
+      });
+
+      const employeeRecordRes = await request(server)
+        .post('/api/v1/employees')
+        .set('Authorization', `Bearer ${financeDirectorToken}`)
+        .send({ fullName: 'Amaka Okoro' })
+        .expect(201);
+      await request(server)
+        .patch(`/api/v1/employees/${employeeRecordRes.body.id}/link-user`)
+        .set('Authorization', `Bearer ${financeDirectorToken}`)
+        .send({ userId: employeeAUser.id })
+        .expect(200);
+
+      await createSubmitApprove(employeeAToken, deptAHeadToken, deptAId, 100000);
+      await new Promise((r) => setTimeout(r, 4000));
+
+      const res = await request(server)
+        .get('/api/v1/reports/requester-spending?from=2026-08-01&to=2026-08-31')
+        .set('Authorization', `Bearer ${financeDirectorToken}`)
+        .expect(200);
+
+      const row = res.body.find((r: any) => r.requesterId === employeeAUser.id);
+      expect(row).toBeDefined();
+      expect(row.requesterName).toBe('Amaka Okoro');
+      expect(row.totalMinorUnits).toBe('100000');
+    });
+
+    it("falls back to the requester's email when no Employee link exists", async () => {
+      const prisma = getE2eDbClient();
+      const employeeBUser = await prisma.user.findUniqueOrThrow({
+        where: { email: 'eb@e2e.test' },
+      });
+
+      await createSubmitApprove(employeeBToken, deptBHeadToken, deptBId, 75000);
+      await new Promise((r) => setTimeout(r, 4000));
+
+      const res = await request(server)
+        .get('/api/v1/reports/requester-spending?from=2026-08-01&to=2026-08-31')
+        .set('Authorization', `Bearer ${financeDirectorToken}`)
+        .expect(200);
+
+      const row = res.body.find((r: any) => r.requesterId === employeeBUser.id);
+      expect(row).toBeDefined();
+      expect(row.requesterName).toBe('eb@e2e.test');
+    });
+
+    it('denies a role without report:view with 403', async () => {
+      await request(server)
+        .get('/api/v1/reports/requester-spending?from=2026-08-01&to=2026-08-31')
         .set('Authorization', `Bearer ${employeeAToken}`)
         .expect(403);
     });
