@@ -5,7 +5,11 @@ import { verify } from 'argon2';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RefreshTokenService } from './refresh-token.service';
 import { UserPrincipal } from '../../shared-kernel/auth/user-principal';
-import { USER_ROLE_SERVICE, UserRoleService } from '../../shared-kernel/auth/user-role.port';
+import {
+  RoleAssignment,
+  USER_ROLE_SERVICE,
+  UserRoleService,
+} from '../../shared-kernel/auth/user-role.port';
 
 @Injectable()
 export class AuthService {
@@ -38,13 +42,7 @@ export class AuthService {
       throw new UnauthorizedException('User has no role assignments');
     }
 
-    const principal: UserPrincipal = {
-      id: user.id,
-      email: user.email,
-      organizationId: roleAssignments[0].organizationId,
-      roles: roleAssignments.map((r) => ({ role: r.role, departmentId: r.departmentId })),
-    };
-
+    const principal = this.buildPrincipal(user, roleAssignments);
     const accessToken = this.jwt.sign(principal);
     const refreshToken = await this.refreshTokens.issue(user.id);
 
@@ -74,17 +72,52 @@ export class AuthService {
     // all removed between token issuance and refresh. That gap is
     // pre-existing and out of #14's scope — flagging it here rather than
     // silently fixing behavior beyond what this change is meant to do.
-    const principal: UserPrincipal = {
-      id: user.id,
-      email: user.email,
-      organizationId: roleAssignments[0].organizationId,
-      roles: roleAssignments.map((r) => ({ role: r.role, departmentId: r.departmentId })),
-    };
+    const principal = this.buildPrincipal(user, roleAssignments);
 
     return { accessToken: this.jwt.sign(principal), refreshToken: result.newToken };
   }
 
   async logout(presentedRefreshToken: string): Promise<void> {
     await this.refreshTokens.revoke(presentedRefreshToken);
+  }
+
+  /**
+   * Phase 9.2 — step-up re-authentication. Re-verifies the CURRENT
+   * password (fetched fresh, not trusted from the presented token) and
+   * mints a new access token carrying `stepUpAt`, without touching the
+   * refresh token at all: this isn't a new login, just an elevation of
+   * the caller's already-valid session for the step-up window
+   * (PermissionGuard checks freshness via shared-kernel/auth/step-up.ts).
+   * Mirrors refresh()'s empty-role-assignments guard for the same reason:
+   * a session can outlive a role change.
+   */
+  async stepUp(userId: string, password: string): Promise<{ accessToken: string }> {
+    const user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId } });
+
+    if (!(await verify(user.passwordHash, password))) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    const roleAssignments = await this.userRoles.getRolesForUser(user.id);
+    if (roleAssignments.length === 0) {
+      throw new UnauthorizedException('User has no role assignments');
+    }
+
+    const principal = this.buildPrincipal(user, roleAssignments, { stepUpAt: Date.now() });
+    return { accessToken: this.jwt.sign(principal) };
+  }
+
+  private buildPrincipal(
+    user: { id: string; email: string },
+    roleAssignments: RoleAssignment[],
+    extra?: Partial<Pick<UserPrincipal, 'stepUpAt'>>,
+  ): UserPrincipal {
+    return {
+      id: user.id,
+      email: user.email,
+      organizationId: roleAssignments[0].organizationId,
+      roles: roleAssignments.map((r) => ({ role: r.role, departmentId: r.departmentId })),
+      ...extra,
+    };
   }
 }
