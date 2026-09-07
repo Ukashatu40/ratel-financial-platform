@@ -2,6 +2,8 @@
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { RequestContextMiddleware } from './common/middleware/request-context.middleware';
 import { ConfigModule } from './config/config.module';
+import { RateLimitModule } from './rate-limit/rate-limit.module';
+import { IdempotencyModule } from './idempotency/idempotency.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { SharedKernelModule } from './shared-kernel/shared-kernel.module';
 // (add AuditModule — order matters: after SharedKernelModule since it needs DomainEventDispatcher, and it should exist before JobsModule starts dispatching, though NestJS resolves this via DI regardless of import order)
@@ -34,6 +36,8 @@ import { ReferenceDataModule } from './reference-data/reference-data.module';
 @Module({
   imports: [
     ConfigModule,
+    RateLimitModule,
+    IdempotencyModule,
     PrismaModule,
     SharedKernelModule,
     WorkflowModule,
