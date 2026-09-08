@@ -8,7 +8,22 @@ export class PrismaUserRoleService implements UserRoleService {
   constructor(private readonly prisma: PrismaService) {}
 
   async getRolesForUser(userId: string): Promise<RoleAssignment[]> {
-    const rows = await this.prisma.userRoleAssignment.findMany({ where: { userId } });
-    return rows.map((r) => ({ role: r.role, departmentId: r.departmentId }));
+    const [departmentRows, organizationRows] = await Promise.all([
+      this.prisma.departmentRoleAssignment.findMany({ where: { userId } }),
+      this.prisma.organizationRoleAssignment.findMany({ where: { userId } }),
+    ]);
+
+    return [
+      ...departmentRows.map((r) => ({
+        role: r.role as string,
+        departmentId: r.departmentId as string | null,
+        organizationId: r.organizationId,
+      })),
+      ...organizationRows.map((r) => ({
+        role: r.role as string,
+        departmentId: null as string | null,
+        organizationId: r.organizationId,
+      })),
+    ];
   }
 }

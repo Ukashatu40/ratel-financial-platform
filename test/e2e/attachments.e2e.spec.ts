@@ -110,19 +110,14 @@ describe('Attachments (e2e)', () => {
     });
 
     const employee = await prisma.user.create({ data: { email: 'e1@e2e.test', passwordHash } });
-    await prisma.userRoleAssignment.create({
-      data: { userId: employee.id, organizationId: org.id, role: 'employee', departmentId: null },
+    await prisma.organizationRoleAssignment.create({
+      data: { userId: employee.id, organizationId: org.id, role: 'employee' },
     });
     const otherEmployee = await prisma.user.create({
       data: { email: 'e2@e2e.test', passwordHash },
     });
-    await prisma.userRoleAssignment.create({
-      data: {
-        userId: otherEmployee.id,
-        organizationId: org.id,
-        role: 'employee',
-        departmentId: null,
-      },
+    await prisma.organizationRoleAssignment.create({
+      data: { userId: otherEmployee.id, organizationId: org.id, role: 'employee' },
     });
 
     const login = async (email: string) =>

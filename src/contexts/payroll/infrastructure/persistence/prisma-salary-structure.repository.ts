@@ -8,7 +8,6 @@ import {
 } from '../../../../shared-kernel/encryption/encryption.port';
 import { SalaryStructure } from '../../domain/aggregates/salary-structure.aggregate';
 import { SalaryStructureRepository } from '../../domain/ports/salary-structure-repository.port';
-// import { SalaryLineItem } from '../../domain/value-objects/salary-line-item';
 import {
   deserializeLineItems,
   serializeLineItems,
@@ -50,18 +49,17 @@ export class PrismaSalaryStructureRepository implements SalaryStructureRepositor
     });
   }
 
+  /**
+   * TECH_DEBT #56 — no longer derives a closing UPDATE for anything. Purely
+   * inserts the given structure as its own new row, at whatever version and
+   * effectiveTo it already carries. Closing a PREVIOUS version is now
+   * saveNextVersion()'s job, driven by that instance's own mutated state.
+   */
   async save(structure: SalaryStructure, tx: TransactionClient): Promise<void> {
     const props = structure.toProps();
     const encryptedLineItems = await this.encryption.encryptJson(
       serializeLineItems(props.baseSalaryLineItems),
     );
-
-    if (props.version > 1) {
-      await tx.salaryStructure.updateMany({
-        where: { employeeId: props.employeeId, effectiveTo: null, version: { lt: props.version } },
-        data: { effectiveTo: props.effectiveFrom },
-      });
-    }
 
     await tx.salaryStructure.create({
       data: {
@@ -75,5 +73,26 @@ export class PrismaSalaryStructureRepository implements SalaryStructureRepositor
         createdAt: props.createdAt,
       },
     });
+  }
+
+  async saveNextVersion(
+    previous: SalaryStructure,
+    next: SalaryStructure,
+    tx: TransactionClient,
+  ): Promise<void> {
+    const previousProps = previous.toProps();
+
+    // Scoped by primary key — strictly tighter than the old employeeId-only
+    // filter this replaces, and makes the #56 investigation's flagged
+    // "no organizationId in the WHERE clause" concern moot: a lookup by id
+    // cannot cross tenants by construction, so no additional predicate is
+    // needed here. Value comes from previous's OWN mutated props (set by
+    // previous.close()), not re-derived from `next`.
+    await tx.salaryStructure.update({
+      where: { id: previousProps.id },
+      data: { effectiveTo: previousProps.effectiveTo },
+    });
+
+    await this.save(next, tx);
   }
 }

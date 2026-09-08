@@ -72,14 +72,14 @@ describe('Financial period lifecycle (e2e)', () => {
     const employee = await prisma.user.create({
       data: { email: 'employee@e2e.test', passwordHash },
     });
-    await prisma.userRoleAssignment.create({
-      data: { userId: employee.id, organizationId: orgId, role: 'employee', departmentId: null },
+    await prisma.organizationRoleAssignment.create({
+      data: { userId: employee.id, organizationId: orgId, role: 'employee' },
     });
 
     const deptHead = await prisma.user.create({
       data: { email: 'depthead@e2e.test', passwordHash },
     });
-    await prisma.userRoleAssignment.create({
+    await prisma.departmentRoleAssignment.create({
       data: {
         userId: deptHead.id,
         organizationId: orgId,
@@ -92,13 +92,8 @@ describe('Financial period lifecycle (e2e)', () => {
       data: { email: 'findir@e2e.test', passwordHash },
     });
     directorId = director.id;
-    await prisma.userRoleAssignment.create({
-      data: {
-        userId: director.id,
-        organizationId: orgId,
-        role: 'finance_director',
-        departmentId: null,
-      },
+    await prisma.organizationRoleAssignment.create({
+      data: { userId: director.id, organizationId: orgId, role: 'finance_director' },
     });
 
     // The audit-trail reader (#8). A distinct role from finance_director on purpose:
@@ -107,8 +102,8 @@ describe('Financial period lifecycle (e2e)', () => {
     const auditor = await prisma.user.create({
       data: { email: 'auditor@e2e.test', passwordHash },
     });
-    await prisma.userRoleAssignment.create({
-      data: { userId: auditor.id, organizationId: orgId, role: 'auditor', departmentId: null },
+    await prisma.organizationRoleAssignment.create({
+      data: { userId: auditor.id, organizationId: orgId, role: 'auditor' },
     });
 
     await prisma.rolePermission.createMany({
@@ -126,12 +121,28 @@ describe('Financial period lifecycle (e2e)', () => {
     });
   });
 
+  // Phase 9.2 — period:close now requires a recent step-up
+  // re-authentication in addition to the permission grant. Every token
+  // this helper returns is stepped-up unconditionally rather than only
+  // for calls that actually hit /close: step-up is purely additive (it's
+  // only even checked on routes that opt in via `requiresStepUp`), so
+  // this can't change behaviour for this file's many other calls
+  // (open/reopen/list/get), and it's far less error-prone across a file
+  // this size than auditing every call site individually for which ones
+  // precede a /close.
   async function loginAs(email: string): Promise<string> {
-    const res = await request(server)
+    const loginRes = await request(server)
       .post('/api/v1/auth/login')
       .send({ email, password: 'E2ePassword!23' })
       .expect(201);
-    return res.body.accessToken;
+
+    const stepUpRes = await request(server)
+      .post('/api/v1/auth/step-up')
+      .set('Authorization', `Bearer ${loginRes.body.accessToken}`)
+      .send({ password: 'E2ePassword!23' })
+      .expect(201);
+
+    return stepUpRes.body.accessToken;
   }
 
   const waitFor = async (

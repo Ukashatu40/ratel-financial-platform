@@ -83,3 +83,23 @@ export class InactiveOrMissingReferenceDataError extends DomainError {
     super(`${entityType} "${id}" does not exist or is no longer active`);
   }
 }
+
+export class IdempotencyKeyInProgressError extends DomainError {
+  readonly code = 'idempotency-key-in-progress';
+  readonly httpStatus = 409;
+
+  constructor() {
+    super(
+      'A request with this Idempotency-Key is already being processed. Retry once it completes rather than concurrently.',
+    );
+  }
+}
+
+export class InvalidIdempotencyKeyError extends DomainError {
+  readonly code = 'invalid-idempotency-key';
+  readonly httpStatus = 400;
+
+  constructor(reason: string) {
+    super(`Invalid Idempotency-Key header: ${reason}`);
+  }
+}

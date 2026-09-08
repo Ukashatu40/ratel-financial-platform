@@ -47,25 +47,33 @@ export async function seedUsers(
   ];
 
   for (const a of assignments) {
-    // Manual find-then-create instead of upsert(), specifically because
-    // @@unique([userId, role, departmentId]) doesn't reliably identify a
-    // row when departmentId is null — Postgres treats every NULL as
-    // distinct in a unique index, so the compound key can't be trusted to
-    // find an existing null-department row. This also sidesteps the
-    // TS2322 error entirely, since we're not constructing a
-    // userId_role_departmentId compound WHERE object at all.
-    const existing = await prisma.userRoleAssignment.findFirst({
-      where: { userId: a.userId, role: a.role as any, departmentId: a.departmentId },
-    });
-
-    if (!existing) {
-      await prisma.userRoleAssignment.create({
-        data: {
+    // TECH_DEBT #14 — real upsert() now works here. The original manual
+    // find-then-create existed because @@unique([userId, role, departmentId])
+    // couldn't reliably match a null-departmentId row (Postgres treats every
+    // NULL as distinct in a unique index). Neither new table has a nullable
+    // column in its unique key, so that limitation no longer applies.
+    if (a.departmentId) {
+      await prisma.departmentRoleAssignment.upsert({
+        where: {
+          userId_role_departmentId: {
+            userId: a.userId,
+            role: a.role as any,
+            departmentId: a.departmentId,
+          },
+        },
+        create: {
           userId: a.userId,
           organizationId,
           role: a.role as any,
           departmentId: a.departmentId,
         },
+        update: {},
+      });
+    } else {
+      await prisma.organizationRoleAssignment.upsert({
+        where: { userId_role: { userId: a.userId, role: a.role as any } },
+        create: { userId: a.userId, organizationId, role: a.role as any },
+        update: {},
       });
     }
   }

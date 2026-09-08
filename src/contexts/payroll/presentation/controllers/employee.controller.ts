@@ -6,6 +6,8 @@ import { PermissionGuard } from '../../../../auth/authorization/permission.guard
 import { RequirePermission } from '../../../../auth/authorization/permission.decorator';
 import { CurrentUser } from '../../../../auth/authentication/current-user.decorator';
 import { UserPrincipal } from '../../../../shared-kernel/auth/user-principal';
+import { Money } from '../../../../shared-kernel/money/money.vo';
+import { SalaryLineItem } from '../../domain/value-objects/salary-line-item';
 import {
   CreateEmployeeHandler,
   LinkEmployeeToUserHandler,
@@ -24,7 +26,20 @@ import {
   GetEmployeeByIdQuery,
   ListEmployeesQuery,
 } from '../../application/employee/employee.queries';
+import {
+  CreateSalaryStructureHandler,
+  CreateSalaryStructureVersionHandler,
+  GetActiveSalaryStructureHandler,
+} from '../../application/salary-structure/salary-structure.handlers';
+import {
+  CreateSalaryStructureCommand,
+  CreateSalaryStructureVersionCommand,
+} from '../../application/salary-structure/salary-structure.commands';
+import { GetActiveSalaryStructureQuery } from '../../application/salary-structure/salary-structure.queries';
 import { CreateEmployeeDto, LinkUserDto, ListEmployeesDto } from '../dto/employee.dto';
+import { CreateSalaryStructureDto } from '../dto/salary-structure.dto';
+
+const DEFAULT_CURRENCY = 'NGN';
 
 @ApiTags('Employees')
 @ApiBearerAuth('access-token')
@@ -38,6 +53,9 @@ export class EmployeeController {
     private readonly deactivateEmployee: DeactivateEmployeeHandler,
     private readonly getEmployeeById: GetEmployeeByIdHandler,
     private readonly listEmployees: ListEmployeesHandler,
+    private readonly createSalaryStructure: CreateSalaryStructureHandler,
+    private readonly createSalaryStructureVersion: CreateSalaryStructureVersionHandler,
+    private readonly getActiveSalaryStructure: GetActiveSalaryStructureHandler,
   ) {}
 
   @ApiOperation({ summary: 'Create an employee (payroll record)' })
@@ -97,4 +115,61 @@ export class EmployeeController {
       new ListEmployeesQuery(user.organizationId, dto.includeInactive),
     );
   }
+
+  @ApiOperation({ summary: "Create an employee's initial salary structure (version 1)" })
+  @RequirePermission('payroll:create')
+  @Post(':id/salary-structure')
+  async createStructure(
+    @Param('id') id: string,
+    @Body() dto: CreateSalaryStructureDto,
+    @CurrentUser() user: UserPrincipal,
+  ): Promise<{ id: string }> {
+    return this.createSalaryStructure.execute(
+      new CreateSalaryStructureCommand(
+        user.organizationId,
+        id,
+        new Date(dto.effectiveFrom),
+        toDomainLineItems(dto.baseSalaryLineItems),
+      ),
+    );
+  }
+
+  @ApiOperation({
+    summary: "Create the next version of an employee's salary structure, closing the previous one",
+  })
+  @RequirePermission('payroll:create')
+  @Post(':id/salary-structure/versions')
+  async createStructureVersion(
+    @Param('id') id: string,
+    @Body() dto: CreateSalaryStructureDto,
+    @CurrentUser() user: UserPrincipal,
+  ): Promise<{ id: string }> {
+    return this.createSalaryStructureVersion.execute(
+      new CreateSalaryStructureVersionCommand(
+        user.organizationId,
+        id,
+        new Date(dto.effectiveFrom),
+        toDomainLineItems(dto.baseSalaryLineItems),
+      ),
+    );
+  }
+
+  @ApiOperation({ summary: "Get an employee's currently active salary structure" })
+  @RequirePermission('payroll:create')
+  @Get(':id/salary-structure')
+  async getStructure(@Param('id') id: string, @CurrentUser() user: UserPrincipal) {
+    return this.getActiveSalaryStructure.execute(
+      new GetActiveSalaryStructureQuery(id, user.organizationId),
+    );
+  }
+}
+
+function toDomainLineItems(
+  dtoItems: CreateSalaryStructureDto['baseSalaryLineItems'],
+): SalaryLineItem[] {
+  return dtoItems.map((item) => ({
+    kind: item.kind,
+    label: item.label,
+    amount: Money.of(BigInt(item.amountMinorUnits), DEFAULT_CURRENCY),
+  }));
 }

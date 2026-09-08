@@ -65,17 +65,17 @@ describe('Expense query endpoints (e2e)', () => {
     });
 
     const employee1 = await prisma.user.create({ data: { email: 'e1@e2e.test', passwordHash } });
-    await prisma.userRoleAssignment.create({
-      data: { userId: employee1.id, organizationId: orgId, role: 'employee', departmentId: null },
+    await prisma.organizationRoleAssignment.create({
+      data: { userId: employee1.id, organizationId: orgId, role: 'employee' },
     });
 
     const employee2 = await prisma.user.create({ data: { email: 'e2@e2e.test', passwordHash } });
-    await prisma.userRoleAssignment.create({
-      data: { userId: employee2.id, organizationId: orgId, role: 'employee', departmentId: null },
+    await prisma.organizationRoleAssignment.create({
+      data: { userId: employee2.id, organizationId: orgId, role: 'employee' },
     });
 
     const deptHead = await prisma.user.create({ data: { email: 'dh@e2e.test', passwordHash } });
-    await prisma.userRoleAssignment.create({
+    await prisma.departmentRoleAssignment.create({
       data: {
         userId: deptHead.id,
         organizationId: orgId,
@@ -87,13 +87,8 @@ describe('Expense query endpoints (e2e)', () => {
     const financeDirector = await prisma.user.create({
       data: { email: 'fd@e2e.test', passwordHash },
     });
-    await prisma.userRoleAssignment.create({
-      data: {
-        userId: financeDirector.id,
-        organizationId: orgId,
-        role: 'finance_director',
-        departmentId: null,
-      },
+    await prisma.organizationRoleAssignment.create({
+      data: { userId: financeDirector.id, organizationId: orgId, role: 'finance_director' },
     });
 
     const login = async (email: string) =>

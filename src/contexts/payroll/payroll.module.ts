@@ -28,6 +28,11 @@ import {
   GetEmployeeByIdHandler,
   ListEmployeesHandler,
 } from './application/employee/employee.handlers';
+import {
+  CreateSalaryStructureHandler,
+  GetActiveSalaryStructureHandler,
+  CreateSalaryStructureVersionHandler,
+} from './application/salary-structure/salary-structure.handlers';
 
 @Module({
   // Cross-context dependency, same shape as ExpenseModule's — pulling in
@@ -55,6 +60,9 @@ import {
     DeactivateEmployeeHandler,
     GetEmployeeByIdHandler,
     ListEmployeesHandler,
+    CreateSalaryStructureHandler,
+    CreateSalaryStructureVersionHandler,
+    GetActiveSalaryStructureHandler,
   ],
   exports: [
     CreatePayrollRunHandler,

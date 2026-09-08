@@ -164,4 +164,60 @@ describe('SalaryStructure aggregate', () => {
       expect(roundTripped.baseSalaryLineItems[0].amount.minorUnits).toBe('300000');
     });
   });
+
+  describe('close()', () => {
+    function buildActiveStructure() {
+      return SalaryStructure.reconstitute({
+        id: 'struct-1',
+        organizationId: 'org-1',
+        employeeId: 'emp-1',
+        version: 1,
+        effectiveFrom: new Date('2026-01-01'),
+        effectiveTo: null,
+        baseSalaryLineItems: [],
+        createdAt: new Date('2026-01-01'),
+      });
+    }
+
+    it('records a SalaryStructureClosed event with the effectiveTo diff (TECH_DEBT #56)', () => {
+      const structure = buildActiveStructure();
+
+      structure.close(new Date('2026-08-01'));
+
+      const events = structure.pullDomainEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].type).toBe('SalaryStructureClosed');
+      expect(events[0].payload.changes).toEqual({
+        effectiveTo: { from: null, to: '2026-08-01T00:00:00.000Z' },
+      });
+    });
+
+    it('actually mutates effectiveTo on the instance, not only the event payload', () => {
+      const structure = buildActiveStructure();
+
+      structure.close(new Date('2026-08-01'));
+
+      expect(structure.toProps().effectiveTo).toEqual(new Date('2026-08-01'));
+    });
+
+    it('produces no diff when close() is called on a freshly-created instance (no baseline)', () => {
+      // Regression pin for the precondition noted in close()'s own doc
+      // comment: only correct when `this` came from reconstitute(). A
+      // create()'d instance has no baseline, so this would be an honest
+      // absence of `changes`, not a bug — asserted directly rather than
+      // left as an unverified assumption in a comment.
+      const structure = SalaryStructure.createInitialVersion({
+        organizationId: 'org-1',
+        employeeId: 'emp-1',
+        effectiveFrom: new Date('2026-01-01'),
+        baseSalaryLineItems: [],
+      });
+      structure.pullDomainEvents(); // clear the creation event
+
+      structure.close(new Date('2026-08-01'));
+
+      const [event] = structure.pullDomainEvents();
+      expect(event.payload.changes).toBeUndefined();
+    });
+  });
 });

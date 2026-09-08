@@ -2,6 +2,10 @@
 export interface RoleAssignment {
   role: string;
   departmentId: string | null;
+  organizationId: string; // NEW — TECH_DEBT #14, consolidates AuthService and
+  // NotificationProcessor onto this one seam instead
+  // of each independently reimplementing "merge two
+  // tables, take the first/any result"
 }
 
 export interface UserRoleService {

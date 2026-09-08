@@ -1,5 +1,7 @@
 // src/reporting/presentation/controllers/reports.controller.ts
 import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
+import { reportsThrottle } from '../../../rate-limit/rate-limit.constants';
 import { DepartmentSpendingSummaryHandler } from '../../application/handlers/department-spending-summary.handler';
 import { TopCategoriesHandler } from '../../application/handlers/top-categories.handler';
 import { TopVendorsHandler } from '../../application/handlers/top-vendors.handler';
@@ -13,6 +15,14 @@ import { CashOutflowQuery } from '../../application/queries/cash-outflow.query';
 import { ProjectSpendingQuery } from '../../application/queries/project-spending.query';
 import { PayrollSummaryQuery } from '../../application/queries/payroll-summary.query';
 import { DateRangeDto } from '../dto/date-range.dto';
+import { PendingDepartmentSpendingHandler } from '../../application/handlers/pending-department-spending.handler';
+import { PendingDepartmentSpendingQuery } from '../../application/queries/pending-department-spending.query';
+import { ExpenseStatusBreakdownHandler } from '../../application/handlers/expense-status-breakdown.handler';
+import { ExpenseStatusBreakdownQuery } from '../../application/queries/expense-status-breakdown.query';
+import { ExpenseAdjustmentsSummaryHandler } from '../../application/handlers/expense-adjustments-summary.handler';
+import { ExpenseAdjustmentsSummaryQuery } from '../../application/queries/expense-adjustments-summary.query';
+import { RequesterSpendingHandler } from '../../application/handlers/requester-spending.handler';
+import { RequesterSpendingQuery } from '../../application/queries/requester-spending.query';
 import { TopNDto } from '../dto/top-n.dto';
 import { JwtAuthGuard } from '../../../auth/authentication/jwt-auth.guard';
 import { PermissionGuard } from '../../../auth/authorization/permission.guard';
@@ -25,6 +35,10 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 @ApiBearerAuth('access-token')
 @Controller({ path: 'reports', version: '1' })
 @UseGuards(JwtAuthGuard, PermissionGuard)
+// Phase 9.6 — stricter per-IP limit than the general 'default' throttle:
+// export/reporting endpoints are a bulk-exfiltration risk distinct from
+// single-resource access, so they get their own tighter ceiling.
+@Throttle({ default: { limit: reportsThrottle.limit, ttl: reportsThrottle.ttl } })
 export class ReportsController {
   constructor(
     private readonly departmentSpendingSummary: DepartmentSpendingSummaryHandler,
@@ -33,6 +47,10 @@ export class ReportsController {
     private readonly cashOutflow: CashOutflowHandler,
     private readonly projectSpending: ProjectSpendingHandler,
     private readonly payrollSummary: PayrollSummaryHandler,
+    private readonly pendingDepartmentSpending: PendingDepartmentSpendingHandler,
+    private readonly expenseStatusBreakdown: ExpenseStatusBreakdownHandler,
+    private readonly expenseAdjustmentsSummary: ExpenseAdjustmentsSummaryHandler,
+    private readonly requesterSpending: RequesterSpendingHandler,
   ) {}
 
   @ApiOperation({ summary: 'Total approved spending grouped by department, within a date range' })
@@ -81,11 +99,67 @@ export class ReportsController {
   }
 
   @ApiOperation({ summary: 'Payroll gross/net totals by run month' })
-  @RequirePermission('payroll:view_sensitive') // NOT report:view — payroll stays behind its existing, stricter permission
+  // NOT report:view — payroll stays behind its existing, stricter permission.
+  // Phase 9.2 — step-up required: exporting/viewing salary data.
+  @RequirePermission('payroll:view_sensitive', { requiresStepUp: true })
   @Get('payroll-summary')
   async getPayrollSummary(@Query() dto: DateRangeDto, @CurrentUser() user: UserPrincipal) {
     return this.payrollSummary.execute(
       new PayrollSummaryQuery(user.organizationId, new Date(dto.from), new Date(dto.to)),
+    );
+  }
+
+  @ApiOperation({
+    summary:
+      'Outstanding spend awaiting approval, grouped by department — not yet approved, so not counted as spent elsewhere',
+  })
+  @RequirePermission('report:view')
+  @Get('pending-department-spending')
+  async getPendingDepartmentSpending(
+    @Query() dto: DateRangeDto,
+    @CurrentUser() user: UserPrincipal,
+  ) {
+    return this.pendingDepartmentSpending.execute(
+      new PendingDepartmentSpendingQuery(user, new Date(dto.from), new Date(dto.to)),
+    );
+  }
+
+  @ApiOperation({
+    summary:
+      'Full expense funnel by status (draft through closed) within a date range — not just approved spend',
+  })
+  @RequirePermission('report:view')
+  @Get('expense-status-breakdown')
+  async getExpenseStatusBreakdown(@Query() dto: DateRangeDto, @CurrentUser() user: UserPrincipal) {
+    return this.expenseStatusBreakdown.execute(
+      new ExpenseStatusBreakdownQuery(user, new Date(dto.from), new Date(dto.to)),
+    );
+  }
+
+  @ApiOperation({
+    summary:
+      'Approved expense adjustments (corrections/reversals) by department — net signed total plus a count, since offsetting adjustments net to zero',
+  })
+  @RequirePermission('report:view')
+  @Get('expense-adjustments-summary')
+  async getExpenseAdjustmentsSummary(
+    @Query() dto: DateRangeDto,
+    @CurrentUser() user: UserPrincipal,
+  ) {
+    return this.expenseAdjustmentsSummary.execute(
+      new ExpenseAdjustmentsSummaryQuery(user, new Date(dto.from), new Date(dto.to)),
+    );
+  }
+
+  @ApiOperation({
+    summary:
+      'Total approved spending grouped by requester, resolved to name (or email if unlinked)',
+  })
+  @RequirePermission('report:view')
+  @Get('requester-spending')
+  async getRequesterSpending(@Query() dto: DateRangeDto, @CurrentUser() user: UserPrincipal) {
+    return this.requesterSpending.execute(
+      new RequesterSpendingQuery(user, new Date(dto.from), new Date(dto.to)),
     );
   }
 }

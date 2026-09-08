@@ -93,6 +93,312 @@ built rather than left implicit — this is a design gap to revisit
 deliberately when multi-tenancy work actually begins, not a bug to patch
 reactively later.
 
+### 60. ~~No rate limiting existed anywhere — Phase 9.6 was designed but never built, and never logged here~~ — RESOLVED
+**What it was:** Phase 9.6 (`PHASES.md`) specifies Redis token-bucket rate
+limiting, called out as especially needed on `/auth/login`/`/auth/refresh`
+("credential-stuffing targets those disproportionately") and on
+`/reports/*` (bulk-exfiltration risk, distinct from single-resource
+access). None of it existed: `@nestjs/throttler` wasn't even a dependency,
+`grep` for "throttl"/"rate.?limit" across `src/` returned nothing, and —
+the part that made this worse than an open TODO — **it was never recorded
+in this file either**, so nothing marked it as a known gap. Found during a
+gap analysis against `PHASES.md` §9, not by an incident.
+
+**Fixed.** New `src/rate-limit/` module: a single named `'default'`
+throttler, applied globally via `APP_GUARD`, backed by
+`@nest-lab/throttler-storage-redis` (own `ioredis` connection, `.on('error',
+...)` handled per gotcha #2/#19 — logged via `Logger.warn`, not swallowed,
+since this connection sits on the request path for nearly every endpoint).
+`AuthController.login()`/`refresh()` and all of `ReportsController` override
+it with stricter limits via `@Throttle({ default: {...} })`.
+
+**Deliberately one named throttler, not three.** `ThrottlerGuard` runs
+EVERY configured named throttler against EVERY route unless explicitly
+`@SkipThrottle()`-ed — its Redis bucket key is per-handler
+(`ClassName-HandlerName-throttlerName-tracker`), but the LIMIT enforced on
+an unrelated route would still be whichever named throttler's own value.
+Defining separate `'auth'`/`'reports'` throttlers globally would have
+silently capped every OTHER endpoint at those tighter limits too, unless
+`@SkipThrottle()` were sprinkled across every controller that isn't auth
+or reports. A single throttler with per-route `@Throttle()` overrides
+avoids that entirely.
+
+**The auth/reports override values are read from `process.env` directly,
+not via `ConfigService`** — documented inline in
+`rate-limit.constants.ts`, not a shortcut taken silently: `@Throttle()`'s
+route-level override is a decorator, evaluated at class-definition time,
+before Nest's DI container exists to inject `ConfigService` into it.
+`@nestjs/throttler` supports a `Resolvable<number>` (a plain function,
+called per-request) for exactly this case. Reading `process.env` directly
+there is safe, not a second source of truth: `validateEnv()`
+(`env.schema.ts`) already ran at boot and would have exited the process if
+these vars were malformed, so by request time `process.env` is guaranteed
+to satisfy the same schema the `'default'` throttler's ConfigService-backed
+factory reads. The numeric defaults themselves live in ONE place
+(`RATE_LIMIT_DEFAULTS`), imported by `env.schema.ts`'s `.default(...)`
+calls rather than restated — avoiding the #22/#37/#47 drift risk this
+codebase repeatedly guards against elsewhere.
+
+**A real connection-lifecycle bug, caught by actually running the e2e
+suite, not by review.** The first version constructed its own `Redis`
+client and passed the live instance into `ThrottlerStorageRedisService`.
+That class only disconnects its client in `onModuleDestroy()` when it
+constructed the client ITSELF (from `RedisOptions`/a URL) — its
+`disconnectRequired` flag stays unset when handed a pre-built instance. So
+the connection was never closed on `app.close()`, surfacing as e2e's "Jest
+did not exit one second after the test run" warning. Fixed by passing
+`RedisOptions` instead and attaching the `.on('error', ...)` handler to the
+resulting `storage.redis` property afterward — `disconnectRequired` is
+then set correctly, and Nest calls `onModuleDestroy()` on whatever
+`storage` instance `ThrottlerModule`'s factory returns regardless of how it
+was constructed, so the connection now closes cleanly. Confirmed by
+re-running the full e2e suite: the warning is gone.
+
+**Auth/reports limit values are code constants (env-overridable), not
+confirmed business figures** — the same honest caveat #10 records for the
+approval thresholds: 5 login attempts / 15 minutes and 20 report calls /
+minute are defensible, industry-typical defaults, not numbers Ratel-Plus
+specified. **To close:** confirm with the business if a different figure
+is wanted; it's a one-line env var change either way
+(`RATE_LIMIT_AUTH_LIMIT` etc.), no code change required.
+
+**Deliberately per-IP everywhere, not per-authenticated-user on general
+endpoints, even though Phase 9.6's wording leads with "per-user for
+authenticated endpoints."** `ThrottlerGuard` is bound globally via
+`APP_GUARD`, which Nest runs BEFORE any controller-level guard —
+including `JwtAuthGuard`, which is what actually populates
+`request.user`. So a tracker keyed on `request.user.id` would see
+`undefined` for every request, silently degrading to a shared bucket for
+all authenticated traffic rather than per-user isolation. Making the
+throttler genuinely user-aware would mean either making `JwtAuthGuard`
+itself global (a real architectural change to the auth model, out of
+scope here and exactly the kind of change CLAUDE.md says to ask before
+making) or re-binding the throttler per-controller after `JwtAuthGuard`
+in every protected controller's `@UseGuards()` array (touches every
+controller for a refinement, not the gap itself). Per-IP still delivers
+the two properties Phase 9.6 actually named as the reason for stricter
+auth/reports limits — bounding credential-stuffing attempts and bulk
+export/scrape volume from a single source — so it closes the real gap
+without the architectural change. **To close further:** revisit if/when
+`JwtAuthGuard` ever becomes a global guard for other reasons.
+
+**IP is read from the raw socket (`req.ip`, Fastify's default), not from
+`X-Forwarded-For`.** Correct for today (no reverse proxy/load balancer in
+front of this app yet — Phase 10 hosting is undecided, per #45's own
+note). **To close:** once Phase 10 picks a deployment topology, configure
+Fastify's `trustProxy` to trust only the actual proxy hop and read the
+real client IP from the forwarded header — enabling `trustProxy` naively
+before that decision is made would let a client trivially spoof its
+tracked identity via a self-supplied header, and NOT enabling it once
+behind a real proxy would make every user behind that proxy share one
+bucket. Neither is done blindly here; both need the Phase 10 answer first.
+
+**Verification:** 7 unit tests for the `process.env` parsing helper
+(`rate-limit.constants.spec.ts`) — the only place that logic is exercised,
+since the controllers only pass the functions by reference, never call
+them at decoration time. One e2e test
+(`rate-limiting.e2e.spec.ts`) proves the guard fires over real HTTP against
+real Redis: a burst against a per-file-lowered auth limit produces a 429
+with a `Retry-After` header and an RFC 7807 body, and any non-429 response
+in the same burst is still a genuine 401, not something the guard let
+through malformed. That spec's assertions are deliberately written to hold
+regardless of leftover Redis state from earlier spec files in the same
+run (every e2e file shares one Redis instance for the whole suite,
+env-setup.ts sets a generous limit for everyone else specifically so their
+`loginAs()` calls never trip this), and its own block window is kept short
+(2s vs. production's 15 minutes) with a bounded wait in `afterAll` so it
+can't bleed into the next spec file's logins. Manually verified against a
+live `docker compose up` stack per this project's standing bar: 5
+consecutive bad-credential login attempts returned 401, the 6th onward
+returned 429 with `Retry-After: 893` and a `application/problem+json`
+body, `GET /health/liveness` and `POST /auth/refresh` stayed completely
+unaffected (separate per-handler buckets), and the app logged zero Redis
+connection errors on boot.
+
+### 61. ~~No `Idempotency-Key` support existed — Phase 7.5 was designed but never built, and never logged here~~ — RESOLVED
+**What it was:** Same shape of gap as #60, found the same way (a gap
+analysis against `PHASES.md`, not an incident). Phase 7.5 specifies every
+mutating (`POST`/`PATCH`) endpoint should accept an optional
+`Idempotency-Key` header — first request executes and caches its response
+in Redis (~24h TTL), a repeat with the same key replays the cached
+response instead of re-executing. Nothing implemented it, and nothing
+here said so. The concrete risk: a client's network-retry-after-timeout
+on, say, `POST /expenses` had no protection against silently creating a
+second expense for one logical submission.
+
+**Fixed.** New `src/idempotency/` module: a global `IdempotencyInterceptor`
+(bound via `APP_INTERCEPTOR`, same "no controller needs to opt in"
+reasoning as #40's `PermissionGuard` and #60's `ThrottlerGuard`), backed by
+`IdempotencyStoreService` — its own dedicated `ioredis` connection,
+`.on('error', ...)` handled and logged per gotcha #2/#19, disconnected in
+`onModuleDestroy()` (learned from #60's leak, done right the first time
+here).
+
+**Deliberately a no-op for the overwhelming majority of requests.** The
+interceptor checks method (`POST`/`PATCH` only) and header presence before
+touching Redis at all — every `GET`/`DELETE` and every mutating request
+that doesn't send the header costs nothing. "Accepts" (Phase 7.5's word) is
+opt-in support, not a requirement; nothing forces a caller to send the
+header, and the existing e2e/integration suites needed zero changes as a
+result — confirmed by running them, not assumed.
+
+**Claiming is atomic (`SET key IN_PROGRESS PX <lockTtl> NX`), not a
+read-then-write.** A second request with the same key while the first is
+still executing gets a specific `409 idempotency-key-in-progress`
+(`IdempotencyKeyInProgressError`), not silently executed a second time in
+parallel — the exact TOCTOU race a naive "check cache, then execute" design
+would reintroduce. Verified concurrently, not just reasoned about: an e2e
+test and a manual two-`curl`-processes-launched-together check against a
+live server both confirm exactly one request wins the claim (201) and the
+other gets 409, with exactly one database row created either way.
+
+**Deliberately caches only successful (2xx) responses, not failures.** The
+harm this feature protects against — a retry double-creating a resource —
+is a success-path problem only; a failed request created nothing to
+duplicate, and a genuinely-failing mutation (e.g. a closed period) will
+fail the same way again regardless of caching. Caching a failure would also
+mean replaying a *transient* error (a dropped DB connection, say)
+verbatim for the full TTL even after the underlying problem clears. On
+failure the claim is released (`DEL`) instead, so a retry with the same key
+after a real failure gets a fresh, honest attempt — verified by an e2e test
+that fails once (invalid currency) then succeeds on retry with the same
+key, asserting the retry is NOT a replay (no `Idempotency-Replayed`
+header) and exactly one row exists afterward.
+
+**The replayed status code is derived, not assumed.** Nest sets the actual
+response status only after the interceptor's own observable pipeline
+resolves, so "what status will this route return" has to be worked out
+independently: `HTTP_CODE_METADATA` via `Reflector` if `@HttpCode()` is
+present, else Nest's own documented default (201 for `POST`, 200
+otherwise) — confirmed no controller in this codebase overrides it
+(`grep -rn "@HttpCode" src` returns nothing), so today every response this
+caches is a plain 201. Written this way anyway, rather than hardcoding
+201, so a future `@HttpCode()` on some PATCH handler doesn't silently
+replay the wrong status.
+
+**Keys are scoped by handler and caller, not global.** The Redis key is
+`idempotency:{Controller}.{handler}:{userId-or-ip}:{raw key}` — per-handler
+so the same key string used against two different endpoints can't collide
+(mirrors `ThrottlerGuard`'s own bucket-key shape from #60), and per-caller
+so two different users choosing the same key value can't collide either.
+Reading `request.user` here is safe in a way #60's tracker couldn't be:
+Nest runs every Guard (including `JwtAuthGuard`, which sets `request.user`)
+before any Interceptor runs, as a strict phase, regardless of
+global-vs-controller registration — unlike two Guards racing each other on
+registration order, which is exactly what stopped #60's throttler from
+being user-aware.
+
+**Verification:** e2e-only (`test/e2e/idempotency.e2e.spec.ts`, 5 tests) —
+matching this codebase's own established precedent that Guard/Interceptor-
+level mechanisms (`PermissionGuard`, `ThrottlerGuard`) get proven over real
+HTTP against real Redis rather than unit-tested with mocked
+`ExecutionContext`s, since the thing actually worth proving is the real
+wiring, not a re-implementation of Nest's own interfaces. Covers: a
+same-key retry replays byte-identically and creates no duplicate row; no
+header sent behaves completely normally (two independent expenses); a
+genuine concurrent race produces exactly one 201 and one 409, with exactly
+one row in the database either way; a key over 255 characters is a
+specific 400; and a failed-then-retried request is NOT replayed and
+succeeds fresh. Manually re-verified against a live `docker compose up`
+stack with real seed data and two backgrounded `curl` processes launched
+together: identical outcomes to the e2e suite, including the `psql`-checked
+row counts.
+
+### 62. ~~No MFA-readiness slot and no step-up re-authentication existed — Phase 9.2 was designed but never built, and never logged here~~ — RESOLVED
+**What it was:** Same gap shape as #60/#61, found the same way. Phase 9.2
+specifies two related but distinct things: (a) an `mfaVerifiedAt` claim
+slot in the access token from day one, so wiring real MFA in later is a
+guard-side change, not a token-shape migration; and (b) step-up
+re-authentication — password re-entry within the last N minutes — on
+`payroll:view_sensitive` and `period:close` specifically, *independent of
+whether MFA is ever enabled*. Neither existed, and neither was logged.
+
+**Built as two separate things, deliberately not conflated.** (a)
+`UserPrincipal.mfaVerifiedAt` is a genuinely reserved, unused slot — no
+code path sets it, since no MFA provider exists; it exists purely so a
+later MFA guard has somewhere to read from without a migration. (b)
+`UserPrincipal.stepUpAt` is real and working today: `AuthService.stepUp()`
+(new `POST /auth/step-up`, requires an already-valid access token)
+re-verifies the CURRENT password against a freshly-fetched user row and
+mints a new access token carrying `stepUpAt: Date.now()`, without touching
+the refresh token — this isn't a new login, just a short-lived elevation of
+the already-valid session. `payroll:view_sensitive` (both
+`PayrollRunController` endpoints and `ReportsController.getPayrollSummary`)
+and `period:close` now pass `{ requiresStepUp: true }` to
+`@RequirePermission`, checked by `PermissionGuard` via
+`shared-kernel/auth/step-up.ts`'s `isStepUpFresh()` — a 10-minute window by
+default, configurable via `STEP_UP_WINDOW_MS`.
+
+**Checked LAST, deliberately, not first.** `PermissionGuard.allow()` only
+runs the step-up check once the permission/scope check has already
+decided to authorize the request — a caller who lacks the permission
+entirely still gets the existing "missing permission" message, not a
+step-up prompt for something they couldn't do anyway. `POST /auth/step-up`
+shares the same strict `authThrottle` (#60) as login/refresh: an attacker
+holding a stolen access token but not the password is still running a
+password-guessing attack against it, just a narrower one.
+
+**Scope deliberately limited to exactly what Phase 9.2 names.**
+`period:open`/reopen (#48) intentionally do NOT require step-up, even
+though reopen shares the `period:open` permission string with plain
+open — `requiresStepUp` is checked per-ROUTE metadata (via `Reflector` on
+`context.getHandler()`), so it genuinely could be added to reopen alone
+without touching open, but Phase 9.2 names only `payroll:view_sensitive`
+and `period:close`. Left as a stated, deliberate scope call for reopen
+(arguably just as sensitive as close) rather than a silent omission —
+revisit if the business wants it.
+
+**A real gap found while updating the existing e2e suite, not by design
+review.** `payroll-lifecycle.e2e.spec.ts` and
+`financial-period-lifecycle.e2e.spec.ts` both call the now-protected
+endpoints extensively (payroll run detail, period close ×10+ call sites).
+Rather than audit every call site for which ones precede a protected
+call, both files' shared `login`/`loginAs` helpers were changed to
+step-up unconditionally for every token they return — safe because
+step-up is purely additive (only checked on routes that opt in), so it
+cannot change behaviour for any of these files' many OTHER calls
+(open/reopen/create/submit/approve/process/list/get). Far less
+error-prone across files this size than hand-auditing every call site.
+
+**A real testing lesson, caught by actually running the suite, not
+assumed.** The first version of the new `step-up.e2e.spec.ts` tried to
+prove staleness by overriding `STEP_UP_WINDOW_MS` to a few hundred ms for
+the file (the same per-file `process.env` override trick #60's rate-limit
+suite uses) and waiting past it — and failed: `expected 403, got 201`.
+The two features aren't actually analogous here: #60's auth/reports
+overrides are read via a `Resolvable<number>` function that reads
+`process.env` fresh on every request (necessary because `@Throttle()`
+decorators evaluate before Nest's DI container exists at all), while
+`PermissionGuard.allow()` reads `STEP_UP_WINDOW_MS` through
+`ConfigService`, whose validated snapshot doesn't reflect a late
+`process.env` mutation the same way. Rather than chase the exact
+boot-timing question further, the test was rewritten to forge an
+already-stale token directly — decode a real login token, strip its
+`iat`/`exp`, re-sign it (same test secret, via a standalone `JwtService`)
+with `stepUpAt` set past the REAL 10-minute production default. This
+sidesteps the timing question entirely and is arguably the better test
+regardless: it proves the actual default a deployment would run with,
+not a shortened stand-in that doesn't prove anything about it.
+
+**Verification:** unit tests for the pure `isStepUpFresh()` comparison (6
+cases: undefined, exact moment, exact boundary, one ms past, long past,
+future-dated). E2e (`test/e2e/step-up.e2e.spec.ts`, 6 tests, full 13-suite/
+134-test e2e run green): a plain login token is refused with a message
+naming `POST /auth/step-up`; step-up with the wrong password is a 401 that
+does NOT elevate the original token; a correct step-up mints a fresh token
+that succeeds while the original token remains unelevated; the same
+mechanism gates `payroll:view_sensitive` on a lighter-weight endpoint
+(list, no payroll run fixture needed); a forged past-window token is
+refused; and `period:open` is confirmed completely unaffected. Manually
+verified against a live `docker compose up` stack with real seed data:
+close without step-up → 403 naming the requirement; step-up with the wrong
+password → 401; step-up with the right password → fresh token; close with
+the elevated token → 201, `psql`-confirmed `status: closed`; the identical
+sequence proven again for `payroll:view_sensitive` on
+`GET /payroll-runs`. The manually-closed seed period was reopened via the
+real `POST .../reopen` endpoint afterward, restoring local dev state
+rather than leaving it mutated.
+
 ---
 
 ## Audit Trail
@@ -339,52 +645,191 @@ by design elsewhere in the system.
 **To close further:** only worth revisiting if a payload ever legitimately
 needs to carry a genuine floating-point value.
 
-### 55. `SalaryStructure.createNextVersion()` has no caller — versioning is unreachable
+### 55. ~~`SalaryStructure.createNextVersion()` has no caller — versioning is unreachable~~ — RESOLVED
 
-**Where:** `SalaryStructure` aggregate, `src/contexts/payroll/application/handlers`.
-**What:** Found while investigating #52's SalaryStructure event work. `createNextVersion()`'s own docstring describes it as closing the previous
-version's `effectiveTo` when a new version is created — but no command handler
-in the payroll application layer calls this method at all (confirmed by grep
-against `application/handlers`, zero matches). `createInitialVersion()` may or
-may not have a caller either; not checked as part of this finding. As it
-stands, a `SalaryStructure` can be created once and never revised through the
-application — the multi-version design the aggregate, `Payslip`'s
-snapshot-at-generation-time safety property, and this docstring all assume is
-not reachable by any endpoint.
-**Why acceptable so far:** No production data exists yet (per #10's precedent
-for the same claim), and every employee currently has at most one salary
-structure version in practice, so the gap has not caused an observable
-problem. But it is not a hardening item — it's a missing feature.
-**To close:** Build `CreateNextSalaryStructureVersionHandler` (or equivalent).
-Two real design questions belong there, not here:
-1. Does closing the previous version happen via a method on
-   `SalaryStructure` itself (e.g. `previous.close(effectiveFrom)`, a normal
-   in-place mutation an already-`reconstitute()`d instance could make, which
-   the generic props diff from #8 WOULD pick up cleanly as
-   `effectiveTo: { from: null, to: <date> }`), or is it a raw repository
-   update alongside inserting the new row? The former keeps the invariant
-   inside the aggregate; the latter splits it across layers.
-2. If it's an aggregate method, does it need its own domain event, or does
-   the auto-diffed `changes` on whatever event already exists at that point
-   cover it? (No event exists yet either way, since no such mutation exists.)
+Resolved together with #56 — see that entry for the shared design. A full
+employee-compensation command surface now exists, nested under `EmployeeController`
+as a sub-resource (`/employees/:id/salary-structure`, matching #42's precedent for
+where employee-adjacent capability lives): `POST` to create the initial version,
+`POST .../versions` to create the next one, `GET` for the active version. Backed by
+two new handlers (`CreateSalaryStructureHandler`, `CreateSalaryStructureVersionHandler`)
+and one query handler (`GetActiveSalaryStructureHandler`), all in a new
+`application/salary-structure/` module mirroring `application/employee/`'s grouped-file
+shape rather than `PayrollRun`'s one-file-per-command layout — the more recent
+precedent in this bounded context.
 
-### 56. `SalaryStructure` version closure is persisted directly by the repository, invisible to the audit pipeline
+**No new permission seeded.** Reuses `payroll:create`, already granted to
+`accountant`/`finance_director` — the same reasoning #48 already established for
+`period:open`/reopen: inventing a dedicated permission here would grant neither role
+a capability they don't already effectively have via `AddPayslipHandler`/
+`payroll:view_sensitive`.
 
-**Where:** `PrismaSalaryStructureRepository.save()`
-**What:** When saving a version > 1, save() closes the previous active version's
-effectiveTo via a raw scoped `updateMany`, entirely in SQL — no SalaryStructure
-instance representing the previous version is ever loaded, mutated, or diffed.
-Confirmed employee-scoped and transactionally atomic (see investigation), but
-structurally unauditable: no domain event exists or can exist for this mutation
-under the current design, since no aggregate is ever involved in it. Distinct
-from #52 (which is about diff-visibility on mutations that DO happen) and from
-#55 (reachability) — this gap exists independent of either.
-**To close:** move the closing mutation into SalaryStructure itself (a `close()`
-method + new event), and change the repository/handler to persist and emit
-events from both the previous and next instances in one transaction, mirroring
-PayrollRun's startProcessing()+complete() pattern. Design question left open:
-whether createNextVersion() should call previous.close() internally or whether
-the (not-yet-built, per #55) handler should orchestrate both explicitly.
+**Cross-organization access returns 404, not 403 or a silent success**, in both the
+version-creation handler and the query handler — `findActiveForEmployee()` is NOT
+organizationId-scoped at the query level (confirmed during the #56 investigation), so
+this is enforced explicitly at the application layer instead, following #43/#48/#49's
+established "not yours is indistinguishable from doesn't exist" reasoning.
+
+**Coverage:** unit tests for all three handlers (existing-structure conflict,
+happy-path creation, cross-org 404 on both the version handler and the query handler,
+and — the assertion that actually proves #56's fix — that `saveNextVersion()` receives
+`previous` already closed, and that both instances' events are merged into one
+`outbox.enqueue()` call). Response shape is an explicit `SalaryStructureView` type,
+not an inferred object literal (#21's discipline). Both new handlers implement the
+shared kernel's `CommandHandler`/`QueryHandler` interfaces explicitly, matching every
+other handler in the codebase — caught and fixed after initial review, since
+`GetActiveSalaryStructureHandler` initially did not.
+
+### 56. ~~`SalaryStructure` version closure was persisted directly by the repository, invisible to the audit pipeline~~ — RESOLVED
+
+**What it was:** `PrismaSalaryStructureRepository.save()` closed the previous active
+version's `effectiveTo` via a raw, employee-scoped `updateMany`, derived entirely from
+the NEW structure's own props — no `SalaryStructure` instance representing the
+previous version was ever loaded, mutated, or diffed. Confirmed employee-scoped and
+transactionally atomic on investigation, but structurally unauditable: no domain event
+could exist for this mutation under that design, since no aggregate was ever involved
+in it. A genuinely bigger gap than #52's three original items, which were all about
+diff-VISIBILITY on a mutation that did happen — this was "no mutation through the
+aggregate happens at all."
+
+**Fixed by moving the closure into the aggregate, as the investigation recommended.**
+New `SalaryStructure.close(effectiveTo: Date)` mutates `props.effectiveTo` in memory
+and calls `recordEvent()` with a new `SalaryStructureClosed` event — ordinary
+mutate-then-record, so `AggregateRoot`'s existing generic diff (#8) picks it up with
+zero special-casing: `changes: { effectiveTo: { from: null, to: <date> } }`.
+
+**Orchestrated externally, not internally inside `createNextVersion()`.** Considered
+having the static factory mutate its own `previous` argument as a side effect and
+rejected it: no other factory in this codebase does that, and it would have been a
+surprising, undocumented shape for a supposedly pure factory. Instead
+`CreateSalaryStructureVersionHandler` calls `previous.close(...)` explicitly after
+`createNextVersion()`, then merges `previous.pullDomainEvents()` and
+`next.pullDomainEvents()` into one `outbox.enqueue()` call — mirroring
+`ProcessPayrollRunHandler`'s existing `startProcessing()` + `complete()` pattern
+exactly, the one precedent this codebase already had for "two mutations, one
+transaction, one merged enqueue."
+
+**Repository contract reshaped, not just patched.** `save()` is now a plain single-row
+insert with no closing side effect at all. New `saveNextVersion(previous, next, tx)`
+does the closing `UPDATE` — scoped by primary key (`where: { id: previousProps.id }`),
+which is strictly tighter than the old `employeeId`-only filter and makes the
+investigation's flagged "no `organizationId` in the WHERE clause" concern moot, since
+an id-scoped lookup cannot cross tenants by construction — then calls `save(next, tx)`.
+The value written is `previous`'s own mutated `effectiveTo`, not re-derived from a
+different instance.
+
+**Existing integration test was invalidated by this change, not just extended.** The
+old `'createNextVersion + save() closes out the previous active version'` test called
+`repo.save(v2, tx)` expecting an implicit side effect that no longer exists under the
+new contract — rewritten to reload `v1` (so it carries a real baseline), call
+`close()` explicitly, and use `saveNextVersion()`, matching the real handler's actual
+sequence rather than the old shortcut.
+
+**Coverage:** dedicated aggregate-level unit tests for `close()` — the event fires
+with the correct diff shape, `effectiveTo` is genuinely mutated on the instance (not
+only reflected in the event payload), and a regression pin confirming `close()` on a
+freshly-`create()`'d instance (no baseline) correctly produces no `changes` at all,
+consistent with `create()`'s existing semantics elsewhere. Both rewritten integration
+tests pass against real Postgres. Handler-level unit coverage (see #55) additionally
+proves the full orchestration end-to-end at the application layer.
+
+### 57. `CashOutflowHandler` could return organization-wide data to a department-scoped caller with no resolvable department — RESOLVED
+
+**Where:** `CashOutflowHandler.execute()`
+**What it was:** `departmentIds` was computed as `scope === 'department' ? [...] : null`, and
+the branch selecting which SQL to run checked `if (departmentIds && departmentIds.length > 0)`.
+A caller whose scope resolved to `'department'` but who had no resolvable
+`departmentId` on any role assignment (`departmentIds === []`, not `null`) failed that
+condition and fell through to the SAME unfiltered, organization-wide query branch an
+`'organization'`-scoped caller gets — silently returning every department's cash outflow
+to someone whose grant was department-scoped.
+
+**Found while writing unit test coverage for this handler** (part of closing the
+zero-coverage gap left by `cash-outflow`/`project-spending`/`payroll-summary` never having
+any tests at all), not by design review or a report. Every sibling handler in this module
+(`DepartmentSpendingSummaryHandler`, `PendingDepartmentSpendingHandler`,
+`ExpenseAdjustmentsSummaryHandler`, etc.) checks `scope === 'department'` directly and
+always applies the filter regardless of the resulting array's length — this was the one
+handler with the `departmentIds.length > 0` fallthrough, introduced because it branches
+between two raw SQL templates rather than building a single Prisma `where` object like
+every other handler here.
+
+**Fixed by failing closed**, mirroring the existing `scope === null` guard at the top of
+the method: `if (scope === 'department' && departmentIds!.length === 0) return [];` before
+either SQL branch runs.
+
+**Coverage:** unit test asserting empty result + `$queryRaw` never called for a
+`department_head` role assignment with `departmentId: null`.
+
+### 58. `ExpenseApprovalPolicy.resolveChain()` silently never escalated adjustments to finance_director, regardless of size — RESOLVED
+
+**Where:** `ExpenseApprovalPolicy.resolveChain()`
+**What it was:** `Expense.createAdjustment()` sets an adjustment's `amount` to
+`original.amount.negate()` — always negative. `resolveChain()`'s threshold check was a bare
+`item.amountMinorUnits < FINANCE_DIRECTOR_THRESHOLD_MINOR_UNITS`. Since any negative number
+is always less than a positive threshold, **every adjustment resolved to the single-step
+`department_head`-only chain, at any magnitude** — a ₦10,000,000 reversal required exactly
+the same single approval as a ₦100 one. `ExpenseAdjustmentApprovalPolicy` (the sibling
+policy deciding only WHETHER an adjustment needs approval at all) already correctly took
+the absolute value; `resolveChain()`, which decides the chain SHAPE, never got the matching
+treatment. Same policy object is used for ordinary expenses (always positive, unaffected)
+and adjustments (always negative, silently broken) via the same `APPROVAL_POLICY` port.
+
+**Found while writing e2e coverage for the new `expense-adjustments-summary` report** — a
+finance_director approving a large adjustment as its (intended) second approval step got
+`ApproverRoleMismatchError` (403), because the chain had already resolved to one step and
+completed on the department_head's approval alone. Not found by design review; found
+because the report needed a real two-approver adjustment to test against.
+
+**Fixed** by taking the absolute value before comparing, mirroring
+`ExpenseAdjustmentApprovalPolicy`'s existing pattern exactly:
+```ts
+const absoluteAmount = item.amountMinorUnits < 0n ? -item.amountMinorUnits : item.amountMinorUnits;
+```
+
+**Same shape as #10, different axis.** #10 was a threshold wrong by magnitude (missing a
+digit); this is a threshold wrong by sign (never handling negative input) — both are
+"a comparison silently wrong for an input shape nothing had tested." `resolveChain()`'s
+existing test file, extended for #10, used exclusively positive amounts; adjustments were
+a second untested input shape for the same function.
+
+**Coverage:** 5 new unit tests in the existing `expense-approval.policy.spec.ts` — a large
+negative amount now escalates to the two-step chain, a small negative amount does not, the
+threshold boundary holds for negative values too (at-threshold and one-kobo-under), and a
+direct symmetry check proving every positive-amount test case elsewhere in the file
+produces an identical chain for its negation. Plus 2 e2e tests in
+`reporting.e2e.spec.ts`'s new `expense-adjustments-summary` block: a large adjustment now
+correctly requires BOTH department_head and finance_director approval in sequence before
+appearing in the report, and a pending (unapproved) adjustment is correctly excluded.
+
+### 59. First payroll e2e coverage — RESOLVED
+
+**What it was:** No payroll e2e spec existed anywhere in the repo (flagged explicitly
+in `notification.subscriber.spec.ts`'s own comment when `PayrollRunRejected` was
+tested at the unit level instead). Standing one up needed employees, salary
+structures, and — the genuinely new part — real field encryption exercised end to
+end, since every other e2e spec either doesn't touch encrypted columns or the
+integration specs substitute `TestEncryptionService` via explicit DI override.
+`createTestApp()` boots the real `AppModule` with no such override, so this is the
+first e2e spec where `AesGcmEnvelopeEncryptionService` genuinely encrypts and
+decrypts `SalaryStructure.encryptedLineItems` and `Payslip.encryptedDetail` against
+a real KEK (`env-setup.ts`'s fixed deterministic test key) — confirmed working with
+no additional setup required.
+
+**Coverage:** `test/e2e/payroll-lifecycle.e2e.spec.ts` — the full lifecycle (employee
+→ salary structure → run → payslip → submit → approve → process), including a real
+encrypt-then-decrypt round trip asserted on both the salary structure's line items
+and the payslip's gross/net pay; the `approved → processing` audit diff (#52) proven
+through the real HTTP → outbox → `AuditSubscriber` path for the first time (previously
+only proven at the integration layer); 403 controls for both `payroll:create` and
+`payroll:approve`; and the `PayrollRunAlreadyExistsError` 409 for a duplicate
+org+month run.
+
+**Deliberately deferred, not forgotten:** no test for `NoOpenPeriodError`. Covering it
+would mean granting `period:close` and driving a real close first, which
+`financial-period-lifecycle.e2e.spec.ts` already covers thoroughly — duplicating that
+setup here just to prove `CreatePayrollRunHandler` delegates correctly to the same
+port didn't seem worth the fixture complexity for this first pass.
 
 ### 9. ~~Failed event delivery to one subscriber is only logged, not retried~~ — RESOLVED
 **Why this mattered more than the original wording suggested:** `AuditSubscriber`
@@ -788,64 +1233,80 @@ Fixed all three layers of that, not just the syntax:
 
 ## Data Integrity
 
-### 14. `UserRoleAssignment`'s compound unique doesn't fully hold with nullable `departmentId`
-**Where:** `@@unique([userId, role, departmentId])` on `UserRoleAssignment`.
-**What:** Postgres treats every `NULL` as distinct within a unique index, so
-this constraint does NOT prevent two rows with the same `(userId, role,
-null)` — i.e. duplicate org-scoped role assignments (any role other than
-`department_head`) could be inserted without violating the DB constraint.
-Discovered via a TS2322 error in the seed script when trying to build a
-compound-unique `where` clause including `null` — Prisma's generated typing
-surfaced the underlying semantic gap.
-**Why acceptable so far:** Seed script now works around it with a manual
-`findFirst`-then-`create` check instead of relying on the constraint;
-duplicate assignments are merely redundant today; no real user-facing
-mutation path creates `UserRoleAssignment` rows yet (only the seed script
-does).
-**To close:** Either (a) use a non-null sentinel value for org-scoped roles'
-`departmentId` instead of `null` — e.g. reference the organization's own ID
-as a placeholder — or (b) split into two tables (`DepartmentRoleAssignment`
-vs `OrganizationRoleAssignment`) so the unique constraint doesn't need a
-nullable column at all. Must be fixed before any endpoint allows users to
-self-assign or admins to assign roles through the API — right now it's a
-seed-only quirk with no production exposure.
+### 14. ~~`UserRoleAssignment`'s compound unique doesn't fully hold with nullable `departmentId`~~ — RESOLVED
 
-**Investigated 2026-08-21, and the attractive third option does NOT exist.**
-PostgreSQL 15 (this project's version) supports `UNIQUE NULLS NOT DISTINCT`, which
-would make the EXISTING constraint behave exactly as intended — no sentinel, no
-table split, no reshaping. Prisma's schema language cannot express it: adding
-`@@unique([userId, role, departmentId], nullsNotDistinct: true)` fails
-`prisma validate` outright (checked against a throwaway copy of the schema rather
-than assumed). The string appears in `@prisma/studio-core`'s driver code but not in
-the schema engine.
+**What it was:** `@@unique([userId, role, departmentId])` did not actually prevent
+duplicate org-scoped role assignments, since Postgres treats every `NULL` as
+distinct within a unique index. The entry's own investigation had already ruled
+out `UNIQUE NULLS NOT DISTINCT` (Prisma cannot express it; hand-written SQL fights
+migration diffing, the same trap #15 hit) and recommended splitting into two
+tables as the fix that ends the problem rather than routing around it.
 
-That leaves only hand-written SQL for either `NULLS NOT DISTINCT` or the equivalent
-partial index
-(`CREATE UNIQUE INDEX … ON user_role_assignments (user_id, role) WHERE department_id IS NULL`).
-Both are expected to fight `migrate dev`: Prisma derives the expected database state
-by replaying migrations into a shadow database and diffing it against
-`schema.prisma`, so an index the schema does not declare reads as drift and gets a
-generated migration to drop it. That is the same trap #15 records for native
-partitioning. **Caveat on this specific point:** the `prisma validate` rejection was
-verified directly; the drift consequence is Prisma's documented diffing behaviour
-plus #15's recorded experience, and was not separately re-run here.
+**Fixed exactly as recommended — no sentinel, no sentinel-meaning drift.**
+`UserRoleAssignment` is replaced by `DepartmentRoleAssignment`
+(`@@unique([userId, role, departmentId])`, `departmentId` NOT nullable — this
+table only ever holds department-scoped rows) and `OrganizationRoleAssignment`
+(`@@unique([userId, role])`, no `departmentId` column at all). Both constraints
+now hold natively, with nothing for the DB to fight and no raw SQL required.
 
-**So this stays OPEN, deliberately, with no partial fix applied.** Working around
-the nullable column with raw SQL that Prisma will fight is worse than the current
-state, which is a seed-only quirk with **no production exposure** — reconfirmed:
-`userRoleAssignment` still has only `findMany`/`findFirst` reads outside the seed
-script, so nothing in the API can create a duplicate. The trigger condition this
-item names has not arrived.
+**No backfill** — reconfirmed at the point of migration: `UserRoleAssignment` was
+still seed-script-only with zero production exposure, the same finding the
+original entry already made. Same precedent #10 already used for a schema-shape
+change needing no data migration.
 
-**Recommendation for whoever closes it:** prefer (b), the table split. Option (a)'s
-sentinel keeps the nullable column and adds a lie — `departmentId` holding an
-organization id — and every existing `departmentId === null` check (permission
-guard, `EffectiveScopeResolver`, seed) would have to change meaning in lockstep,
-which is a silent-drift risk across security-relevant code. (b) removes the nullable
-column from the constraint entirely, so the DB enforces the rule natively with no
-raw SQL and nothing for Prisma to fight. It is the larger change, but it is the one
-that ends the problem instead of routing around it — and the right moment for it is
-when the role-assignment API is built, not before.
+**The real work was the call-site audit, not the schema change.** `grep`-driven,
+not assumed — five real consumers found across two rounds of searching, not the
+two originally suspected:
+
+1. `PrismaUserRoleService.getRolesForUser()` — the one true seam. Now queries
+   both tables and merges into the same `RoleAssignment[]` shape every consumer
+   already depended on.
+2. `AuthService.login()`/`refresh()` — was bypassing the port entirely with a
+   direct `prisma.user.findUnique({ include: { roleAssignments: true } })`.
+   Refactored onto `USER_ROLE_SERVICE` instead of adapted to query two tables
+   inline, removing a duplicate-logic call site rather than just patching it.
+   **Caught and fixed a real, pre-existing bug while in this code:** `refresh()`
+   had no empty-assignments guard, unlike `login()` — a user whose roles were
+   all removed between token issuance and refresh would hit a raw `TypeError`
+   (500) instead of a clean 401. Not a separately-deferred item; fixed in the
+   same change since the method body was already being touched.
+3. `NotificationProcessor` — same direct-query pattern as `AuthService`, same
+   fix, now onto the same seam.
+4. `NotificationSubscriber.handlePeriodStatusChange()` — a genuinely different
+   shape (reverse lookup: "which users hold any of these roles" driven
+   dynamically off `role_permissions`, not "which roles does this user hold").
+   Doesn't fit `UserRoleService`'s per-user shape, so queried directly across
+   both tables and merged — a second port wasn't justified for one caller,
+   unlike `ResourceScopeRegistry`'s genuine multi-provider need.
+5. `WorkflowEngine`'s test double (`FakeUserRoleService` in
+   `workflow-engine.spec.ts`) — found only via `npm run build`, not `grep`,
+   since it's a test fixture implementing `UserRoleService`'s interface rather
+   than querying Prisma. `RoleAssignment` gained a required `organizationId`
+   field (deliberately — consolidates items 2 and 3 above onto one shape rather
+   than each independently reimplementing "merge two tables, take any result"),
+   which is a breaking change to every literal construction of that type. The
+   compiler caught all 8 call sites in this file directly; none needed logic
+   changes, since `WorkflowEngine`'s role verification never reads
+   `organizationId` — confirmed by inspection before adding a placeholder value
+   to each.
+
+**`PermissionGuard`, `PrismaEffectiveScopeResolver`, and `ResourceScopeRegistry`
+confirmed untouched** — none of them ever read the raw assignment table
+directly; all three consume either already-resolved `UserPrincipal.roles` or
+the unrelated `RolePermission` table.
+
+**Seed script gained a real capability, not just a routing branch.** The
+original manual find-then-create workaround existed specifically because the
+compound unique couldn't reliably match a null-`departmentId` row. Neither new
+table has a nullable column in its key, so genuine `upsert()` now works —
+the workaround this fix replaces is obsolete, not merely routed around.
+
+**Verification order matched the risk:** e2e first (real Postgres, real HTTP,
+all 9 rewritten fixture files — the widest blast radius of any change this
+session), confirmed green; then a full `npm run build`, which surfaced the
+`WorkflowEngine` test double as a second surprise call site; fixed, rebuilt
+clean; then the full unit suite. All three layers green before this entry was
+closed, consistent with #52/#55/#56's standard.
 
 ## Performance
 
@@ -1789,7 +2250,81 @@ recorded as per-row import failures before ever reaching an HTTP response).
 
 ---
 
-*Last updated: 2026-08-22. Most recently: **closed #51** —
+*Last updated: 2026-09-07. Most recently: **closed #62** — the third and
+last of this batch (#60/#61/#62 all found the same way: a gap analysis
+against `PHASES.md`'s security phases, none previously logged). Phase 9.2
+specifies two separate things: a reserved `mfaVerifiedAt` claim slot for
+real MFA later (built as literally that — an unused field, no code path
+sets it, since no MFA provider exists) and step-up re-authentication —
+password re-entry within 10 minutes — on `payroll:view_sensitive` and
+`period:close` specifically, independent of MFA. The real one:
+`POST /auth/step-up` re-verifies the current password and mints a fresh
+access token carrying `stepUpAt`, without touching the refresh token;
+`PermissionGuard` checks it LAST, only after the permission/scope check
+already authorized the request, so a caller who lacks the permission
+entirely still sees the existing "missing permission" message rather than
+a step-up prompt. Deliberately scoped to exactly what Phase 9.2 names —
+`period:open`/reopen do NOT require it, a stated scope call, not an
+oversight, even though reopen could take it independently since
+`requiresStepUp` is per-route metadata. A real testing lesson along the
+way: the first staleness test tried #60's per-file `process.env` override
+trick and failed (`ConfigService`'s snapshot doesn't reflect a late
+mutation the way #60's request-time `process.env` reads do) — rewritten to
+forge an already-stale token by decoding a real one and re-signing it past
+the REAL 10-minute default, which ended up proving more (the actual
+production value) than a shortened test-only window would have. Manually
+verified against live `docker compose up`, including reopening the
+seed period afterward to restore local dev state.*
+
+*Earlier the same day: **closed #61** — Phase 7.5's
+`Idempotency-Key` support had the identical gap shape as #60: never built,
+never logged. Built as a global `IdempotencyInterceptor`
+(`src/idempotency/`, own Redis connection, disconnected correctly in
+`onModuleDestroy()` from the start — applying #60's just-learned lesson
+rather than repeating it) that's a no-op unless a request is POST/PATCH
+AND sends the header. Claiming is atomic (`SET ... NX`), so a genuine
+concurrent retry with the same key gets a specific 409 rather than
+executing twice — proved with real concurrency, both in an e2e test and
+with two `curl` processes launched together against a live server,
+checking the database row count directly rather than trusting the HTTP
+responses alone. Deliberately caches only 2xx responses, not failures: a
+failed request created nothing to duplicate, and caching a transient
+failure would replay it for the full TTL even after the real problem
+clears — verified by a fail-then-retry-succeeds test asserting the retry
+is a fresh execution, not a replay. The replayed status code is derived
+from `@HttpCode()` metadata (falling back to Nest's own documented
+POST=201/other=200 default) rather than hardcoded, since Nest only sets
+the real status after the interceptor's pipeline has already resolved.*
+
+*Earlier the same day: **closed #60** — Phase 9.6
+rate limiting didn't exist anywhere in the codebase (not even a dependency)
+and, worse, was never logged in this file either — found via a gap
+analysis against `PHASES.md` §9, not an incident. Built as a single global
+`'default'` throttler (`src/rate-limit/`, Redis-backed via
+`@nest-lab/throttler-storage-redis`) with per-route `@Throttle()` overrides
+tightening `/auth/login`, `/auth/refresh`, and all of `/reports/*` —
+deliberately one named throttler rather than three, since `ThrottlerGuard`
+applies every configured named throttler to every route unless skipped,
+and a second/third global throttler would have silently capped unrelated
+endpoints too. A real connection-lifecycle bug was caught by running the
+e2e suite, not by review: the first version left its Redis connection open
+past `app.close()` (visible as "Jest did not exit"), because
+`ThrottlerStorageRedisService` only disconnects a client it constructed
+itself, not one handed to it pre-built — fixed by passing `RedisOptions`
+instead. Two honest gaps recorded rather than silently accepted: the
+tracker is per-IP everywhere (not per-authenticated-user on general
+endpoints), because a user-aware tracker needs `request.user`, which
+`JwtAuthGuard` populates AFTER the global `ThrottlerGuard` already ran —
+fixing that for real means either a global `JwtAuthGuard` or per-controller
+guard reordering, both bigger changes than this gap warranted; and IP is
+read from the raw socket, not `X-Forwarded-For`, correct only until Phase
+10 puts a real proxy in front of this app. Verified at three layers plus a
+live manual run against `docker compose up`: 5 bad-credential logins
+succeed (401), the 6th+ returns 429 with `Retry-After` and an RFC 7807
+body, and unrelated endpoints (health check, the separate `/auth/refresh`
+handler) stay unaffected.*
+
+*Earlier: 2026-08-22 — **closed #51** —
 `CurrencyMismatchError` now extends `DomainError` (500,
 `currency-mismatch`), taking the option #50's audit recommended: keep the
 status honest (a programmer error, not client-caused) but stop discarding

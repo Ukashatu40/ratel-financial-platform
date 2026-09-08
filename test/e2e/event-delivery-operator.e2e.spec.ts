@@ -51,13 +51,8 @@ describe('Event delivery operator API (e2e)', () => {
     const director = await prisma.user.create({
       data: { email: 'findir@e2e.test', passwordHash },
     });
-    await prisma.userRoleAssignment.create({
-      data: {
-        userId: director.id,
-        organizationId: orgId,
-        role: 'finance_director',
-        departmentId: null,
-      },
+    await prisma.organizationRoleAssignment.create({
+      data: { userId: director.id, organizationId: orgId, role: 'finance_director' },
     });
 
     // The negative control's actor: authenticated, in the same org, but holding a
@@ -66,8 +61,8 @@ describe('Event delivery operator API (e2e)', () => {
     const employee = await prisma.user.create({
       data: { email: 'employee@e2e.test', passwordHash },
     });
-    await prisma.userRoleAssignment.create({
-      data: { userId: employee.id, organizationId: orgId, role: 'employee', departmentId: null },
+    await prisma.organizationRoleAssignment.create({
+      data: { userId: employee.id, organizationId: orgId, role: 'employee' },
     });
 
     await prisma.rolePermission.createMany({
@@ -158,7 +153,7 @@ describe('Event delivery operator API (e2e)', () => {
       ]);
     });
 
-    it('never returns another organization\'s deliveries', async () => {
+    it("never returns another organization's deliveries", async () => {
       await seedDelivery({ organizationId: otherOrgId, outboxEventId: 'outbox-elsewhere' });
       const token = await loginAs('findir@e2e.test');
 

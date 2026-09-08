@@ -107,7 +107,7 @@ describe('PrismaSalaryStructureRepository (integration)', () => {
   });
 
   describe('versioning', () => {
-    it('createNextVersion + save() closes out the previous active version', async () => {
+    it('createNextVersion + close() + saveNextVersion() closes out the previous active version', async () => {
       const v1 = SalaryStructure.createInitialVersion({
         organizationId: orgId,
         employeeId,
@@ -118,27 +118,32 @@ describe('PrismaSalaryStructureRepository (integration)', () => {
       });
       await prisma.$transaction((tx) => repo.save(v1, tx));
 
-      const v2 = SalaryStructure.createNextVersion(v1, {
+      // Reload so v1 carries a real baseline — matching how the real handler
+      // (CreateSalaryStructureVersionHandler) obtains `previous`.
+      const reloadedV1 = (await repo.findActiveForEmployee(employeeId))!;
+
+      const v2 = SalaryStructure.createNextVersion(reloadedV1, {
         effectiveFrom: new Date('2026-08-01'),
         baseSalaryLineItems: [
           { kind: 'allowance', label: 'Raised Base', amount: Money.of(350000n, 'NGN') },
         ],
       });
-      await prisma.$transaction((tx) => repo.save(v2, tx));
+      reloadedV1.close(v2.toProps().effectiveFrom);
 
-      // findActiveForEmployee should now return v2, not v1
+      await prisma.$transaction((tx) => repo.saveNextVersion(reloadedV1, v2, tx));
+
       const active = await repo.findActiveForEmployee(employeeId);
       expect(active!.toProps().version).toBe(2);
       expect(active!.baseSalaryLineItems[0].label).toBe('Raised Base');
 
-      // v1's row should now have a non-null effectiveTo in the raw DB
       const v1Row = await prisma.salaryStructure.findFirstOrThrow({
         where: { employeeId, version: 1 },
       });
       expect(v1Row.effectiveTo).not.toBeNull();
+      expect(v1Row.effectiveTo!.toISOString()).toBe(v2.toProps().effectiveFrom.toISOString());
     });
 
-    it('preserves v1 unchanged in the database after v2 is saved', async () => {
+    it('preserves v1 as its own row (not overwritten) after v2 is saved', async () => {
       const v1 = SalaryStructure.createInitialVersion({
         organizationId: orgId,
         employeeId,
@@ -149,16 +154,19 @@ describe('PrismaSalaryStructureRepository (integration)', () => {
       });
       await prisma.$transaction((tx) => repo.save(v1, tx));
 
-      const v2 = SalaryStructure.createNextVersion(v1, {
+      const reloadedV1 = (await repo.findActiveForEmployee(employeeId))!;
+      const v2 = SalaryStructure.createNextVersion(reloadedV1, {
         effectiveFrom: new Date('2026-08-01'),
         baseSalaryLineItems: [
           { kind: 'allowance', label: 'New Base', amount: Money.of(350000n, 'NGN') },
         ],
       });
-      await prisma.$transaction((tx) => repo.save(v2, tx));
+      reloadedV1.close(v2.toProps().effectiveFrom);
+
+      await prisma.$transaction((tx) => repo.saveNextVersion(reloadedV1, v2, tx));
 
       const v1RowCount = await prisma.salaryStructure.count({ where: { employeeId, version: 1 } });
-      expect(v1RowCount).toBe(1); // v1 still exists as its own row, not overwritten
+      expect(v1RowCount).toBe(1);
     });
   });
 });

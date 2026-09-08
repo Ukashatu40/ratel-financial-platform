@@ -52,13 +52,8 @@ describe('CSV import (e2e)', () => {
     });
 
     const accountant = await prisma.user.create({ data: { email: 'acct@e2e.test', passwordHash } });
-    await prisma.userRoleAssignment.create({
-      data: {
-        userId: accountant.id,
-        organizationId: orgId,
-        role: 'accountant',
-        departmentId: null,
-      },
+    await prisma.organizationRoleAssignment.create({
+      data: { userId: accountant.id, organizationId: orgId, role: 'accountant' },
     });
 
     accountantToken = (
@@ -371,7 +366,7 @@ describe('CSV import (e2e)', () => {
       expect(statusRes.body.failureReason).toBeNull();
     });
 
-    it('clears a previous attempt\'s failureReason when the job is processed again', async () => {
+    it("clears a previous attempt's failureReason when the job is processed again", async () => {
       // The same ImportJob row can legitimately be processed more than once
       // (operator re-enqueue, queue redelivery — the path the Inbox pattern
       // exists for). A stale reason surviving onto a `completed` job would be
@@ -574,9 +569,7 @@ describe('CSV import (e2e)', () => {
           .expect(404);
 
         // 404 must mean "not yours", not "deleted anyway" — assert it survived.
-        expect(
-          await prisma.columnMapping.findUnique({ where: { id: foreign.id } }),
-        ).not.toBeNull();
+        expect(await prisma.columnMapping.findUnique({ where: { id: foreign.id } })).not.toBeNull();
       });
 
       it('rejects an unauthenticated delete with 401', async () => {

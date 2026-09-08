@@ -1,5 +1,8 @@
 // src/config/env.schema.ts
 import { z } from 'zod';
+import { RATE_LIMIT_DEFAULTS } from '../rate-limit/rate-limit.constants';
+import { IDEMPOTENCY_DEFAULTS } from '../idempotency/idempotency.constants';
+import { STEP_UP_DEFAULTS } from '../shared-kernel/auth/step-up';
 
 export const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'staging', 'production']).default('development'),
@@ -47,6 +50,28 @@ export const envSchema = z.object({
   SMTP_HOST: z.string().default('localhost'),
   SMTP_PORT: z.coerce.number().int().positive().default(1025),
   SMTP_FROM: z.string().default('noreply@ratel-plus.com'),
+
+  // Phase 9.6 — per-IP token-bucket rate limiting (rate-limit.module.ts).
+  // Stricter defaults on auth (credential-stuffing) and reports/export
+  // (bulk-exfiltration) than the general baseline every other endpoint
+  // gets. Defaults live in rate-limit.constants.ts, not restated here.
+  RATE_LIMIT_DEFAULT_LIMIT: z.coerce.number().int().positive().default(RATE_LIMIT_DEFAULTS.DEFAULT_LIMIT),
+  RATE_LIMIT_DEFAULT_TTL_MS: z.coerce.number().int().positive().default(RATE_LIMIT_DEFAULTS.DEFAULT_TTL_MS),
+  RATE_LIMIT_AUTH_LIMIT: z.coerce.number().int().positive().default(RATE_LIMIT_DEFAULTS.AUTH_LIMIT),
+  RATE_LIMIT_AUTH_TTL_MS: z.coerce.number().int().positive().default(RATE_LIMIT_DEFAULTS.AUTH_TTL_MS),
+  RATE_LIMIT_REPORTS_LIMIT: z.coerce.number().int().positive().default(RATE_LIMIT_DEFAULTS.REPORTS_LIMIT),
+  RATE_LIMIT_REPORTS_TTL_MS: z.coerce.number().int().positive().default(RATE_LIMIT_DEFAULTS.REPORTS_TTL_MS),
+
+  // Phase 7.5 — Idempotency-Key support (idempotency.module.ts).
+  IDEMPOTENCY_RESPONSE_TTL_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(IDEMPOTENCY_DEFAULTS.RESPONSE_TTL_MS),
+  IDEMPOTENCY_LOCK_TTL_MS: z.coerce.number().int().positive().default(IDEMPOTENCY_DEFAULTS.LOCK_TTL_MS),
+
+  // Phase 9.2 — step-up re-authentication window (shared-kernel/auth/step-up.ts).
+  STEP_UP_WINDOW_MS: z.coerce.number().int().positive().default(STEP_UP_DEFAULTS.WINDOW_MS),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;
