@@ -8,7 +8,9 @@ import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
 import { ProblemDetailsFilter } from './shared-kernel/errors/problem-details.filter';
 import { EnvConfig } from './config/env.schema';
+import { buildCorsOptions } from './config/cors.config';
 import multipart from '@fastify/multipart';
+import cors from '@fastify/cors';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
 async function bootstrap(): Promise<void> {
@@ -20,6 +22,16 @@ async function bootstrap(): Promise<void> {
   await app.register(multipart);
 
   const config = app.get(ConfigService<EnvConfig>);
+
+  // CORS_ORIGINS unset -> parseCorsOrigins() returns false -> @fastify/cors
+  // sends no Access-Control-Allow-Origin header at all, i.e. disabled.
+  // Registered before routes (this is the only place any register() call
+  // happens before app.listen()), matching @fastify/cors's own requirement
+  // that it run ahead of the routes it needs to decorate.
+  await app.register(cors, buildCorsOptions(
+    config.get('CORS_ORIGINS', { infer: true }),
+    config.get('CORS_CREDENTIALS', { infer: true }) ?? false,
+  ));
 
   // RFC 7807 everywhere (Phase 5.7 / 7.6) — single global filter, no per-controller opt-in
   app.useGlobalFilters(new ProblemDetailsFilter());

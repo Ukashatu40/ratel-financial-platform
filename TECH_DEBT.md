@@ -399,6 +399,59 @@ sequence proven again for `payroll:view_sensitive` on
 real `POST .../reopen` endpoint afterward, restoring local dev state
 rather than leaving it mutated.
 
+### 63. ~~No CORS support at all~~ — RESOLVED
+**What it was:** Flagged as a minor observation during the original Phase 9
+gap analysis (#60's session) but not built at the time — no `@fastify/cors`
+dependency, no `cors` registration in `main.ts`. Not something PHASES.md's
+own text promises (unlike #60/#61/#62), but a standard baseline for any API
+a browser-based frontend will call directly, and asked for explicitly once
+a frontend was in view.
+
+**Built as `src/config/cors.config.ts`** — a pure `parseCorsOrigins()`
+(env string → `false | true | string[]`, the exact shape `@fastify/cors`'s
+`origin` option wants) plus `buildCorsOptions()`, called identically from
+`main.ts` and `test/e2e/setup/app.helper.ts` so e2e tests exercise the
+real registration, not a stand-in.
+
+**Disabled by default, deliberately — the same "explicit opt-in per
+environment" posture as `KMS_MASTER_KEY_ID`, `FIELD_ENCRYPTION_MASTER_KEY`,
+and the JWT secrets.** `CORS_ORIGINS` unset means `parseCorsOrigins()`
+returns `false`, so `@fastify/cors` never sends
+`Access-Control-Allow-Origin` at all — confirmed both by e2e test and by a
+live `curl` against a real `docker compose up` boot with the var unset.
+When set, it's a comma-separated exact-match allowlist (`"*"` for
+reflect-any-origin, dev convenience only) — no subdomain/wildcard pattern
+matching, so an operator's allowlist is exactly what it says, not a
+pattern that might match more than intended.
+
+**`CORS_CREDENTIALS` defaults to `false`, not merely unset — a real Zod
+gotcha caught before it shipped, not after.** The first draft used
+`z.coerce.number()`'s sibling, `z.coerce.boolean()` — which is
+`Boolean(str)` under the hood, and `Boolean('false')` is `true` (any
+non-empty string is truthy in JS). A literal `CORS_CREDENTIALS=false` in
+an env file would have silently turned credentials ON, the exact
+opposite of what an operator typing that line intends. Caught by
+reasoning through the coercion before writing the test, not by a failing
+one — fixed with an explicit `z.enum(['true','false']).transform(v => v
+=== 'true')` instead. `false` is also the *correct* default regardless of
+this bug: this API is bearer-token-only, never cookie-based (the same
+fact #9.5 already used to call CSRF "largely moot" here), so
+`Access-Control-Allow-Credentials` isn't needed for a cross-origin
+`Authorization` header the way it would be for a cookie-based session.
+
+**Verification:** 8 unit tests for `parseCorsOrigins()`/`buildCorsOptions()`
+(unset, empty, wildcard alone and mixed into a list, single origin,
+multi-origin with whitespace, trailing-comma noise). New
+`test/e2e/cors.e2e.spec.ts` (4 tests, full 14-suite/137-test e2e run
+green): an allowed origin gets the header reflected back exactly, a
+disallowed origin gets no header at all (the request still succeeds —
+CORS is enforced by the browser refusing to read the response, not a
+server-side block, which the test asserts explicitly rather than leaving
+implicit), no credentials header by default, and CORS_ORIGINS unset means
+no header for ANY origin. Manually re-verified against a live
+`docker compose up` stack for both the configured-allowlist and the
+unset-default cases.
+
 ---
 
 ## Audit Trail
@@ -2346,7 +2399,20 @@ recorded as per-row import failures before ever reaching an HTTP response).
 
 ---
 
-*Last updated: 2026-09-09. Most recently: **fully closed #10** — the
+*Last updated: 2026-09-09. Most recently: **closed #63** — CORS support
+(`src/config/cors.config.ts`), disabled by default like every other
+opt-in-per-environment setting in this codebase (KMS, field-encryption
+key, JWT secrets) — unset `CORS_ORIGINS` means `@fastify/cors` never
+sends `Access-Control-Allow-Origin` at all, confirmed by e2e test and a
+live boot. A real bug caught before shipping, not after: the first draft
+used `z.coerce.boolean()` for `CORS_CREDENTIALS`, which is `Boolean(str)`
+under the hood — `Boolean('false')` is `true`, so a literal
+`CORS_CREDENTIALS=false` would have silently enabled credentials. Fixed
+with an explicit string-enum parse. Verified with 8 unit tests plus a new
+4-test e2e spec (full suite green at 137/137) and a live `docker compose
+up` walkthrough of both the configured and default-disabled cases.*
+
+*Earlier the same day: **fully closed #10** — the
 original "still open" business question (₦500,000/₦1,000,000 were this
 codebase's assumed figures, not confirmed policy) now has a confirmed
 answer, and both policies were redesigned, not just re-thresholded.

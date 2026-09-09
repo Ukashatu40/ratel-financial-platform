@@ -72,6 +72,20 @@ export const envSchema = z.object({
 
   // Phase 9.2 — step-up re-authentication window (shared-kernel/auth/step-up.ts).
   STEP_UP_WINDOW_MS: z.coerce.number().int().positive().default(STEP_UP_DEFAULTS.WINDOW_MS),
+
+  // CORS (main.ts / config/cors.config.ts). Comma-separated origin
+  // allowlist, or "*"; unset disables CORS entirely (the safe default —
+  // see cors.config.ts's parseCorsOrigins() for the full reasoning).
+  //
+  // Deliberately NOT z.coerce.boolean() below — that's `Boolean(str)`
+  // under the hood, and `Boolean('false')` is `true` (any non-empty
+  // string is truthy). A literal CORS_CREDENTIALS=false in an env file
+  // would silently turn credentials ON. Parsed as an explicit enum instead.
+  CORS_ORIGINS: z.string().optional(),
+  CORS_CREDENTIALS: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;
