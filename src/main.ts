@@ -11,6 +11,7 @@ import { EnvConfig } from './config/env.schema';
 import { buildCorsOptions } from './config/cors.config';
 import multipart from '@fastify/multipart';
 import cors from '@fastify/cors';
+import helmet from '@fastify/helmet';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
 async function bootstrap(): Promise<void> {
@@ -19,9 +20,18 @@ async function bootstrap(): Promise<void> {
     new FastifyAdapter({ logger: false }), // structured logging (Phase 4.4/Phase 9) wired properly in the observability pass — Fastify's default logger is off to avoid double-logging in the meantime
   );
 
+  // Without this, a SIGTERM (what every container orchestrator sends on a
+  // rolling deploy/restart) kills the process immediately — PrismaService's
+  // and IdempotencyStoreService's own OnModuleDestroy hooks (DB pool /
+  // Redis disconnect) already exist but were never being called, and
+  // Fastify's own close() (which drains in-flight requests instead of
+  // dropping them mid-response) never got a chance to run either.
+  app.enableShutdownHooks();
+
   await app.register(multipart);
 
   const config = app.get(ConfigService<EnvConfig>);
+  const isProduction = config.get('NODE_ENV', { infer: true }) === 'production';
 
   // CORS_ORIGINS unset -> parseCorsOrigins() returns false -> @fastify/cors
   // sends no Access-Control-Allow-Origin header at all, i.e. disabled.
@@ -32,6 +42,19 @@ async function bootstrap(): Promise<void> {
     config.get('CORS_ORIGINS', { infer: true }),
     config.get('CORS_CREDENTIALS', { infer: true }) ?? false,
   ));
+
+  // Standard security headers (HSTS, X-Content-Type-Options, X-Frame-Options,
+  // etc.) — this app is a pure JSON API with no HTML surface in production
+  // (Swagger is non-production only, gated below), so Helmet's defaults have
+  // nothing of ours to conflict with there. Content-Security-Policy is the
+  // one exception, and only outside production: it's meant to constrain a
+  // PAGE's own scripts/styles, and Swagger UI's inline scripts and CDN-hosted
+  // assets would fail Helmet's default CSP directives. Disabling CSP where
+  // Swagger is the only HTML this app ever serves isn't a weakening of
+  // anything actually protected in production.
+  await app.register(helmet, {
+    contentSecurityPolicy: isProduction ? undefined : false,
+  });
 
   // RFC 7807 everywhere (Phase 5.7 / 7.6) — single global filter, no per-controller opt-in
   app.useGlobalFilters(new ProblemDetailsFilter());
@@ -50,7 +73,7 @@ async function bootstrap(): Promise<void> {
   app.setGlobalPrefix('api');
   app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
 
-  if (config.get('NODE_ENV', { infer: true }) !== 'production') {
+  if (!isProduction) {
     const swaggerConfig = new DocumentBuilder()
       .setTitle('Ratel Financial Platform API')
       .setDescription(

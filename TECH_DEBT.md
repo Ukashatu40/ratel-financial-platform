@@ -452,6 +452,82 @@ no header for ANY origin. Manually re-verified against a live
 `docker compose up` stack for both the configured-allowlist and the
 unset-default cases.
 
+### 64. ~~Pre-deployment hardening: known dependency CVEs, no security headers, no graceful shutdown~~ — RESOLVED
+**What it was:** Surfaced by a direct "is this production-ready" review
+ahead of an actual deploy decision — not found via `PHASES.md` this time,
+found by actually running `npm audit` and checking what `main.ts` does and
+doesn't do, the same "verify, don't assume" standard this file has used
+throughout. Three separate things, fixed together since they're all part
+of the same "what does a production deploy need" pass:
+
+**1. Dependency vulnerabilities.** `npm audit --omit=dev` showed 8
+production-reachable findings. `npm audit fix` (no `--force`) resolved the
+two that actually matter — `find-my-way` (Fastify's router; DDoS via
+HTTP/2) and `fast-uri` (SSRF/host-confusion via IDN and backslash tricks)
+— both sit under every request this app handles, both fixed as
+lockfile-only patch bumps within already-declared semver ranges, zero
+`package.json` changes, full regression suite green afterward. Three
+findings remain and were deliberately NOT force-upgraded: `fastify` itself
+(moderate; fix needs `@nestjs/platform-fastify` v12, a breaking major —
+not worth the regression risk for a moderate finding right before a
+deploy), `nodemailer` (high; the CVEs are all in a `raw`/legacy-signature
+code path — checked `smtp-email-provider.adapter.ts` directly, it only
+ever calls `sendMail({to, subject, html, from})`, never the affected API,
+so present in the tree but not reachable through this codebase's actual
+usage), and `mysql2`/`deepmerge-ts` (transitively via the `prisma` CLI
+package, confirmed a `devDependency` — `grep` for `@prisma/config` and
+`deepmerge-ts` in `src/` returns nothing, so neither loads into the
+running production process at all; this is CI/dev-tooling exposure, not
+the live API's).
+
+**2. No security headers at all.** Added `@fastify/helmet`, registered in
+both `main.ts` and `test/e2e/setup/app.helper.ts` (parity, same reasoning
+as CORS/#63). `Content-Security-Policy` is deliberately the one directive
+disabled outside production: Swagger UI (non-production only) needs its
+inline scripts and CDN-hosted assets, which Helmet's default CSP would
+block, and this app serves no other HTML for a CSP to protect — disabling
+it where Swagger is the only HTML surface isn't a weakening of anything
+actually protected in production.
+
+**3. No graceful shutdown.** `PrismaService` and `IdempotencyStoreService`
+already implemented `OnModuleDestroy` (DB pool / Redis disconnect), and
+every BullMQ processor already gets shutdown cleanup for free from
+`@nestjs/bullmq`'s own `WorkerHost` base class — none of it was ever being
+invoked, because nothing had called `app.enableShutdownHooks()`. Without
+it, a SIGTERM (what every container orchestrator sends on a rolling
+deploy/restart) killed the process immediately: connections dropped
+mid-use instead of closing cleanly, and Fastify never got the chance to
+drain in-flight requests instead of cutting them off mid-response. One
+line (`app.enableShutdownHooks()`) fixed all of it at once, since the
+hooks were already correctly written. Deliberately NOT mirrored into
+`app.helper.ts` — that call wires OS signal listeners, which has nothing
+to do with app-config parity (unlike CORS/Helmet) and would leak
+SIGTERM/SIGINT listeners across this suite's many `createTestApp()` calls
+for no benefit, since `afterAll`'s `app.close()` already invokes the same
+lifecycle hooks directly without needing a signal.
+
+**TECH_DEBT #13 also resolved into a confirmed decision in this same
+review** (not a code change, see that entry): disbursement is confirmed
+external to this system for now, so `ProcessPayrollRunHandler`'s no-op is
+correct-on-purpose, not deferred work — the residual concern is just that
+`completed` doesn't currently say so to an API caller who doesn't already
+know it.
+
+**Verification:** full unit (438), integration (44), and e2e (139,
+including 2 new dedicated specs — `security-headers.e2e.spec.ts` pinning
+`X-Content-Type-Options`, `X-Frame-Options`, `X-DNS-Prefetch-Control`
+present and `X-Powered-By` absent, plus the CSP-disabled-outside-production
+case) all green. Manually verified against a live `docker compose up`
+boot: real `curl` confirming the headers, and a real `kill -TERM` against
+the running process confirmed the fixed process now exits cleanly with no
+error and no `SIGKILL` needed. The "before" state was NOT re-tested against
+the old code to compare — Node's own default SIGTERM disposition is to
+exit immediately regardless, so the observable difference this fix makes
+isn't "hangs vs. exits," it's "drops connections/in-flight requests
+abruptly vs. lets `OnModuleDestroy` hooks and Fastify's own connection
+draining run first." That's a claim about what the hooks DO, verified by
+reading them, not a claim about a race that was measured before and after.
+
 ---
 
 ## Audit Trail
@@ -1285,12 +1361,32 @@ Resolved alongside item #1 — `organizationId` now derives from
 `@CurrentUser().organizationId` rather than the request body, and the
 endpoint no longer throws a placeholder error.
 
-### 13. `ProcessPayrollRunHandler` does not perform real disbursement
+### 13. `ProcessPayrollRunHandler` does not perform real disbursement — CONFIRMED DELIBERATE, not a gap
 **Where:** `ProcessPayrollRunHandler`
 **What:** Flips `PayrollRun` state (`approved → processing → completed`)
 synchronously with no actual bank transfer / payment gateway integration.
-**To close:** Build as a real BullMQ job once a disbursement provider is
-chosen, per the original blueprint's `jobs/processors/` design.
+
+**Confirmed with the business (pre-deployment review, 2026-09-09): this is
+intentional, not deferred work.** This system is the payroll
+approval/system-of-record layer only — disbursement happens OUTSIDE it
+(manual bank transfer, after export) for now. Real in-system disbursement
+is an explicit future capability, not something this release was ever
+meant to provide. Re-filing the ORIGINAL concern narrowly, since the
+"do nothing" behaviour itself is now correct on purpose: **`completed`
+does not distinguish "approved and processed by this system" from "money
+actually left the account."** Nothing in the API response or the audit
+trail currently flags that distinction for a caller who doesn't already
+know it. **To close, if/when this becomes worth doing before real
+disbursement is built:** either rename `completed` to something that
+doesn't imply payment (e.g. a client reading `status: 'completed'` off
+this API today could reasonably assume money moved), or add a field/note
+making the "not yet disbursed" fact explicit in the response — cheap,
+and removes a real footgun for whoever builds the frontend against this
+API without having read this file.
+
+**To close for real:** build `ProcessPayrollRunHandler` as a real BullMQ
+job once a disbursement provider is chosen, per the original blueprint's
+`jobs/processors/` design — unchanged from the original entry.
 
 ---
 
@@ -2399,7 +2495,30 @@ recorded as per-row import failures before ever reaching an HTTP response).
 
 ---
 
-*Last updated: 2026-09-09. Most recently: **closed #63** — CORS support
+*Last updated: 2026-09-09. Most recently: **closed #64** and confirmed
+#13 — a direct pre-deployment review ("is this production-ready"), not a
+`PHASES.md` gap analysis this time. `npm audit fix` (no `--force`)
+resolved the two production-reachable, actually-exploitable findings
+(`find-my-way` HTTP/2 DDoS, `fast-uri` SSRF/host-confusion) as lockfile-
+only patch bumps — the remaining findings (`fastify` itself, `nodemailer`,
+`mysql2`/`deepmerge-ts`) were checked individually and left alone with
+reasons recorded, not blanket-ignored: `nodemailer`'s CVEs are all in a
+`raw`/legacy-signature path this codebase never calls, and
+`mysql2`/`deepmerge-ts` are transitively under the `prisma` CLI, confirmed
+a `devDependency` never loaded into the running app. Added `@fastify/helmet`
+(CSP off outside production only, where Swagger UI needs it) and
+`app.enableShutdownHooks()` — the latter needed zero new cleanup code,
+since `PrismaService`/`IdempotencyStoreService`'s `OnModuleDestroy` and
+every BullMQ processor's shutdown handling already existed and simply
+were never being invoked. Also confirmed with the business and closed
+#13 as a documented decision rather than a gap: disbursement is
+deliberately external to this system for now; the one residual concern
+is that `completed` doesn't currently signal "not yet disbursed" to an
+API caller. Verified: full unit/integration/e2e (139 e2e, incl. 2 new
+specs) green, plus a live `docker compose up` walkthrough of the real
+headers and a real `SIGTERM` producing a clean exit.*
+
+*Earlier the same day: **closed #63** — CORS support
 (`src/config/cors.config.ts`), disabled by default like every other
 opt-in-per-environment setting in this codebase (KMS, field-encryption
 key, JWT secrets) — unset `CORS_ORIGINS` means `@fastify/cors` never
