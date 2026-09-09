@@ -1032,7 +1032,7 @@ permission and therefore a seed row plus a re-seed.
 
 ## Domain / Business Logic
 
-### 10. Expense approval thresholds were 10x too small — MAGNITUDE RESOLVED, business figure still OPEN
+### 10. ~~Expense approval thresholds were 10x too small~~ — FULLY RESOLVED, confirmed policy implemented
 **Where:** `ExpenseAdjustmentApprovalPolicy`, `ExpenseApprovalPolicy`
 
 **Originally filed** as "the ₦1,000,000 re-approval threshold is a guess, not
@@ -1110,10 +1110,106 @@ is ever fixed after real rows exist, those in-flight rows need an explicit
 decision, not a silent re-resolve — re-resolving a chain mid-approval would
 discard approvals already recorded against it.
 
-**Still open — the original business question.** ₦500,000 and ₦1,000,000 are now
-implemented faithfully, but they remain the figures *this codebase assumed*, not
-ones Ratel-Plus confirmed. **To close:** confirm both with the business and
-adjust the two constants (and the two spec files' expectations, deliberately).
+**The original business question is now answered — RESOLVED.** The single
+₦500,000 finance_director threshold above is now REPLACED entirely by a
+confirmed three-tier policy, and the adjustment policy is REPLACED by a
+directional rule rather than a fixed re-approval threshold:
+
+- **`ExpenseApprovalPolicy`** — up to and including ₦100,000: a single
+  department_head, scoped to the expense's own department (unchanged
+  shape). Above ₦100,000 and below ₦1,000,000: a panel of **3 DIFFERENT**
+  department_heads. ₦1,000,000 and above: the same panel, PLUS
+  finance_director. Boundary semantics again "at threshold escalates":
+  <= 100,000 is tier 1, exactly 1,000,000 is tier 3 — no gap between tiers.
+- **`ExpenseAdjustmentApprovalPolicy`** — no longer a magnitude threshold at
+  all. Approval is required if, and only if, the corrected amount is
+  GREATER than the original — a ₦1 increase needs sign-off exactly like a
+  ₦10,000,000 one; a decrease of any size, including a full reversal to
+  zero, never does. This REQUIRED a genuinely new capability: adjustments
+  previously could only be a full reversal (`amount = -original.amount`,
+  no way to specify a corrected total at all) — `Expense.createAdjustment()`,
+  `CreateAdjustmentCommand`, and `CreateAdjustmentDto` now take
+  `newAmountMinorUnits` (the corrected TOTAL, not a delta), and the
+  aggregate computes and persists the delta itself. Zero is still a legal
+  corrected amount — the original full-reversal behaviour is now just the
+  `newAmountMinorUnits: 0` case of the general mechanism, not a separate
+  code path. Two new domain errors: `InvalidAdjustmentAmountError` (400,
+  negative) and `NoOpAdjustmentError` (400, corrected amount equals the
+  current amount — nothing to adjust, and would otherwise violate the DB's
+  `chk_amount_nonzero` constraint as a raw, un-actionable error).
+
+**"3 DIFFERENT department_heads" surfaced a real conflict between the
+authorization layer and the new workflow design, found before writing any
+test — not discovered by one failing.** `department_head`'s `expense:approve`
+grant was `scope: 'department'`, enforced by `PermissionGuard` BEFORE
+`WorkflowEngine` ever runs — meaning a department_head could never even
+reach the handler to approve an expense outside their own department,
+regardless of what the approval chain's own step required. Since a
+department normally has exactly one head, "3 different department_heads"
+was structurally unreachable under the old grant. Fixed by broadening the
+grant to `scope: 'organization'` (`prisma/seed/fixtures/role-permissions.ts`)
+— the sole-approver tier (<= ₦100,000) still enforces "must be THIS
+expense's own department head" independently, via `WorkflowEngine`'s
+existing per-step `requiredScope` check, which runs regardless of what
+`PermissionGuard` grants at the authorization layer.
+
+**That broadening exposed a second, genuinely pre-existing gap, closed in
+the same pass rather than left for later:** `WorkflowEngine.recordRejection()`
+had ZERO verification of its own — no self-rejection check, no role/
+department check — safe only because `PermissionGuard`'s (now-broadened)
+department-scoped grant used to be the sole thing stopping a wrong-department
+person from ever reaching it. `recordRejection()` is now async and mirrors
+`recordApproval()`'s checks (new `SelfRejectionNotAllowedError`, plus the
+same role/department verification, factored into a shared
+`assertHoldsCurrentStepRole()` so the two can't drift independently) —
+touching both Expense's and Payroll's reject handlers, which now pass the
+mapped `Approvable` and `await` the call.
+
+**"3 DIFFERENT" is enforced chain-wide, not just consecutively — a second,
+independent SoD gap found while designing the panel, not by a failing
+test.** The existing separation-of-duties check only compared an approver
+against the item's requester, once. Nothing stopped the SAME person from
+filling TWO of the panel's three seats as long as they weren't
+consecutive (seat 1 and seat 3, with someone else at seat 2, would have
+passed unnoticed). New `DuplicateApproverInChainError` (403) in
+`WorkflowEngine.recordApproval()`, checked against every PRIOR *approved*
+record in the chain (not just the immediately preceding one, and
+deliberately not triggered by a prior *rejection* from the same person —
+a rejection ends the chain, so it isn't "reusing" an approval slot).
+
+**Verification, at all four layers this codebase treats as the bar for a
+new capability:**
+- Unit: `expense-approval.policy.spec.ts` and
+  `expense-adjustment-approval.policy.spec.ts` fully rewritten for the new
+  rules (tier boundaries, panel scope, directional adjustment logic);
+  `expense.aggregate.spec.ts`'s `createAdjustment()` tests updated for
+  `newAmountMinorUnits` plus new cases for both new errors and both delta
+  signs; `workflow-engine.spec.ts` gained dedicated coverage for the
+  chain-wide duplicate check (including the non-consecutive case
+  specifically) and for `recordRejection()`'s new self-rejection/role/
+  department checks (including the exact cross-department regression case
+  the broadened grant introduced).
+- Integration: `prisma-expense.repository.spec.ts`'s adjustment
+  persistence test updated for the new factory signature.
+- E2e: `expense-lifecycle.e2e.spec.ts` gained two more department_head
+  fixture users (org-wide panel candidates) and full coverage of all three
+  tiers plus the duplicate-approver 403 — including the tier-1/tier-2 and
+  tier-2/tier-3 boundary cases at the exact ₦100,000 and ₦1,000,000 marks.
+  `reporting.e2e.spec.ts`'s `expense-adjustments-summary` block updated for
+  the new adjustment API (also deduplicated — found 3 byte-identical
+  copies of two tests while updating this block, an accidental copy-paste
+  left over from earlier work, unrelated to this item; removed while
+  already touching every call site in the block). Full 13-suite/133-test
+  e2e run green.
+- Manual, against a live `docker compose up` stack with 3 real
+  department_head accounts: all three tiers exercised end-to-end
+  (including both exact boundaries), the duplicate-approver 403 confirmed
+  on a real second attempt from the same department_head, and the
+  adjustment policy confirmed on a real ₦10,000 decrease (auto-approved)
+  vs. a real one-kobo increase (required approval) against the same
+  original expense — plus the no-op-adjustment 400, the negative-amount
+  400, and a real full-reversal (`newAmountMinorUnits: 0`) all confirmed
+  working.
 
 ### 10b. Only `ExpenseApprovalPolicy` branches on amount; payroll does not
 **Where:** `PayrollApprovalPolicy`
@@ -2250,7 +2346,34 @@ recorded as per-row import failures before ever reaching an HTTP response).
 
 ---
 
-*Last updated: 2026-09-07. Most recently: **closed #62** — the third and
+*Last updated: 2026-09-09. Most recently: **fully closed #10** — the
+original "still open" business question (₦500,000/₦1,000,000 were this
+codebase's assumed figures, not confirmed policy) now has a confirmed
+answer, and both policies were redesigned, not just re-thresholded.
+`ExpenseApprovalPolicy`: <= ₦100,000 stays a single department_head; above
+that and below ₦1,000,000 needs a panel of 3 DIFFERENT department_heads;
+₦1,000,000+ adds finance_director on top. `ExpenseAdjustmentApprovalPolicy`:
+no more magnitude threshold at all — approval is required exactly when the
+corrected amount exceeds the original, any size, which required adding a
+genuine new capability (`newAmountMinorUnits` — adjustments could previously
+only be a full reversal, never a corrected total). Two real gaps surfaced
+and closed in the same pass, both found by reasoning through the design
+before writing tests, not by a failing one: "3 different department_heads"
+was unreachable under the old department-scoped `expense:approve` grant
+(broadened to organization-scope, with `WorkflowEngine`'s own per-step check
+still enforcing the single-approver tier's department restriction
+independently), and broadening that grant exposed that
+`WorkflowEngine.recordRejection()` had never had ANY verification of its
+own — fixed to mirror `recordApproval()`'s checks, now async, touching both
+Expense's and Payroll's reject handlers. Also added: chain-wide (not just
+consecutive) duplicate-approver prevention, so the "3 different" requirement
+is actually enforced, not just structurally implied. Verified at all four
+layers — unit, integration, a full e2e run (133/133), and a live
+`docker compose up` walkthrough with 3 real department_head accounts
+exercising every tier, both exact boundaries, the duplicate-approver 403,
+and both adjustment directions including the zero/no-op/negative edge cases.*
+
+*Earlier: 2026-09-07 — **closed #62** — the third and
 last of this batch (#60/#61/#62 all found the same way: a gap analysis
 against `PHASES.md`'s security phases, none previously logged). Phase 9.2
 specifies two separate things: a reserved `mfaVerifiedAt` claim slot for
