@@ -527,38 +527,42 @@ describe('Reporting (e2e)', () => {
   });
 
   describe('expense-adjustments-summary', () => {
-    it('nets a small (auto-approved) reversal and a large (approval-required) reversal correctly', async () => {
+    // Rewritten for the new comparison-based ExpenseAdjustmentApprovalPolicy
+    // (approval required only when the corrected amount is GREATER than the
+    // original — TECH_DEBT #10, resolved). "Large" originals are kept at or
+    // below ₦100,000 deliberately, so createSubmitApprove()'s single approve()
+    // call still suffices for the ORIGINAL expense under
+    // ExpenseApprovalPolicy's new tiers — this describe block is testing
+    // report aggregation, not approval-chain shape, which has its own
+    // dedicated coverage in expense-lifecycle.e2e.spec.ts.
+    it('nets a small (auto-approved) decrease and a larger (approval-required) increase correctly', async () => {
       const smallOriginalId = await createSubmitApprove(
         employeeAToken,
         deptAHeadToken,
         deptAId,
-        500000,
+        500000, // ₦5,000
       );
       const smallAdjustRes = await request(server)
         .post(`/api/v1/expenses/${smallOriginalId}/adjustments`)
         .set('Authorization', `Bearer ${financeDirectorToken}`)
-        .send({ reason: 'Duplicate charge, small correction' })
+        .send({ reason: 'Duplicate charge, small correction', newAmountMinorUnits: 400000 }) // -100000 delta, auto-approved
         .expect(201);
 
       const largeOriginalId = await createSubmitApprove(
         employeeAToken,
         deptAHeadToken,
         deptAId,
-        150000000,
+        10000000, // ₦100,000 — stays in ExpenseApprovalPolicy's sole-approver tier
       );
       const largeAdjustRes = await request(server)
         .post(`/api/v1/expenses/${largeOriginalId}/adjustments`)
         .set('Authorization', `Bearer ${financeDirectorToken}`)
-        .send({ reason: 'Large reversal, genuinely needs sign-off' })
+        .send({ reason: 'Under-recorded, genuinely needs sign-off', newAmountMinorUnits: 15000000 }) // +5000000 delta, requires approval
         .expect(201);
 
       await request(server)
         .post(`/api/v1/expenses/${largeAdjustRes.body.id}/approve`)
         .set('Authorization', `Bearer ${deptAHeadToken}`)
-        .expect(201);
-      await request(server)
-        .post(`/api/v1/expenses/${largeAdjustRes.body.id}/approve`)
-        .set('Authorization', `Bearer ${financeDirectorToken}`)
         .expect(201);
 
       await new Promise((r) => setTimeout(r, 4000));
@@ -580,7 +584,7 @@ describe('Reporting (e2e)', () => {
 
       const row = res.body.find((r: any) => r.departmentId === deptAId);
       expect(row).toBeDefined();
-      expect(row.netMinorUnits).toBe('-150500000');
+      expect(row.netMinorUnits).toBe('4900000');
       expect(row.adjustmentCount).toBe(2);
 
       void smallAdjustRes;
@@ -591,12 +595,12 @@ describe('Reporting (e2e)', () => {
         employeeAToken,
         deptAHeadToken,
         deptAId,
-        150000000,
+        10000000, // ₦100,000
       );
       await request(server)
         .post(`/api/v1/expenses/${originalId}/adjustments`)
         .set('Authorization', `Bearer ${financeDirectorToken}`)
-        .send({ reason: 'Left pending, deliberately not approved' })
+        .send({ reason: 'Left pending, deliberately not approved', newAmountMinorUnits: 15000000 })
         .expect(201);
 
       await new Promise((r) => setTimeout(r, 4000));
@@ -608,115 +612,6 @@ describe('Reporting (e2e)', () => {
 
       const res = await request(server)
         .get(`/api/v1/reports/expense-adjustments-summary?from=2026-08-01&to=${toParam}`)
-        .set('Authorization', `Bearer ${financeDirectorToken}`)
-        .expect(200);
-
-      expect(res.body.find((r: any) => r.departmentId === deptAId)).toBeUndefined();
-    });
-    it('nets a small (auto-approved) reversal and a large (approval-required) reversal correctly', async () => {
-      const smallOriginalId = await createSubmitApprove(
-        employeeAToken,
-        deptAHeadToken,
-        deptAId,
-        500000,
-      );
-      const smallAdjustRes = await request(server)
-        .post(`/api/v1/expenses/${smallOriginalId}/adjustments`)
-        .set('Authorization', `Bearer ${financeDirectorToken}`)
-        .send({ reason: 'Duplicate charge, small correction' })
-        .expect(201);
-
-      const largeOriginalId = await createSubmitApprove(
-        employeeAToken,
-        deptAHeadToken,
-        deptAId,
-        150000000,
-      );
-      const largeAdjustRes = await request(server)
-        .post(`/api/v1/expenses/${largeOriginalId}/adjustments`)
-        .set('Authorization', `Bearer ${financeDirectorToken}`)
-        .send({ reason: 'Large reversal, genuinely needs sign-off' })
-        .expect(201);
-
-      await request(server)
-        .post(`/api/v1/expenses/${largeAdjustRes.body.id}/approve`)
-        .set('Authorization', `Bearer ${deptAHeadToken}`)
-        .expect(201);
-      await request(server)
-        .post(`/api/v1/expenses/${largeAdjustRes.body.id}/approve`)
-        .set('Authorization', `Bearer ${financeDirectorToken}`)
-        .expect(201);
-
-      await new Promise((r) => setTimeout(r, 4000));
-
-      // Expense.createAdjustment() dates every adjustment `new Date()` at the
-      // moment it's created — NOT inherited from the original expense's
-      // expenseDate (2026-08-15 here). So the query window must extend through
-      // the actual moment this test ran, not just August 2026, or both
-      // adjustment rows fall outside the filter even though the ORIGINAL
-      // expenses are safely inside it.
-      const to = new Date();
-      to.setDate(to.getDate() + 1); // buffer past "now"
-      const toParam = to.toISOString().slice(0, 10);
-
-      const res = await request(server)
-        .get(`/api/v1/reports/expense-adjustments-summary?from=2026-08-01&to=${toParam}`)
-        .set('Authorization', `Bearer ${financeDirectorToken}`)
-        .expect(200);
-
-      const row = res.body.find((r: any) => r.departmentId === deptAId);
-      expect(row).toBeDefined();
-      expect(row.netMinorUnits).toBe('-150500000');
-      expect(row.adjustmentCount).toBe(2);
-
-      void smallAdjustRes;
-    });
-
-    it('does NOT count an adjustment still sitting in pending_approval', async () => {
-      const originalId = await createSubmitApprove(
-        employeeAToken,
-        deptAHeadToken,
-        deptAId,
-        150000000,
-      );
-      await request(server)
-        .post(`/api/v1/expenses/${originalId}/adjustments`)
-        .set('Authorization', `Bearer ${financeDirectorToken}`)
-        .send({ reason: 'Left pending, deliberately not approved' })
-        .expect(201);
-
-      await new Promise((r) => setTimeout(r, 4000));
-
-      // Same date-range fix as above — this adjustment is also dated "now".
-      const to = new Date();
-      to.setDate(to.getDate() + 1);
-      const toParam = to.toISOString().slice(0, 10);
-
-      const res = await request(server)
-        .get(`/api/v1/reports/expense-adjustments-summary?from=2026-08-01&to=${toParam}`)
-        .set('Authorization', `Bearer ${financeDirectorToken}`)
-        .expect(200);
-
-      expect(res.body.find((r: any) => r.departmentId === deptAId)).toBeUndefined();
-    });
-
-    it('does NOT count an adjustment still sitting in pending_approval', async () => {
-      const originalId = await createSubmitApprove(
-        employeeAToken,
-        deptAHeadToken,
-        deptAId,
-        150000000, // above threshold
-      );
-      await request(server)
-        .post(`/api/v1/expenses/${originalId}/adjustments`)
-        .set('Authorization', `Bearer ${financeDirectorToken}`)
-        .send({ reason: 'Left pending, deliberately not approved' })
-        .expect(201);
-
-      await new Promise((r) => setTimeout(r, 4000));
-
-      const res = await request(server)
-        .get('/api/v1/reports/expense-adjustments-summary?from=2026-08-01&to=2026-08-31')
         .set('Authorization', `Bearer ${financeDirectorToken}`)
         .expect(200);
 

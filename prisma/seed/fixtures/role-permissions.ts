@@ -15,8 +15,15 @@ const MATRIX: Array<{ role: string; permission: string; scope: string }> = [
   { role: 'accountant', permission: 'expense:create', scope: 'organization' },
   { role: 'accountant', permission: 'expense:adjust', scope: 'organization' },
 
-  // Department Head
-  { role: 'department_head', permission: 'expense:approve', scope: 'department' },
+  // Department Head — organization scope, NOT department. ExpenseApprovalPolicy's
+  // panel tiers (expenses > ₦100,000) require 3 DIFFERENT department_heads, which
+  // must be reachable from any department, not just the expense's own — a single
+  // department normally has one head, so "3 different" is structurally
+  // impossible if this grant stayed department-scoped. The sole-approver tier
+  // (<= ₦100,000) still enforces "must be THIS expense's own department head"
+  // independently, via WorkflowEngine's per-step requiredScope check — that
+  // check runs regardless of what PermissionGuard grants at this layer.
+  { role: 'department_head', permission: 'expense:approve', scope: 'organization' },
 
   // Finance Director
   { role: 'finance_director', permission: 'expense:create', scope: 'organization' },

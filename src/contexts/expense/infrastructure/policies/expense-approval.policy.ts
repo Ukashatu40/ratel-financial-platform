@@ -1,52 +1,67 @@
 // src/contexts/expense/infrastructure/policies/expense-approval.policy.ts
 import { Injectable } from '@nestjs/common';
 import { Approvable } from '../../../../shared-kernel/workflow/approvable';
-import { ApprovalChain } from '../../../../shared-kernel/workflow/approval-chain';
+import { ApprovalChain, ApprovalStep } from '../../../../shared-kernel/workflow/approval-chain';
 import { ApprovalPolicy } from '../../../../shared-kernel/workflow/approval-policy.port';
 
 /**
- * Simple threshold-based policy for v1 — this is deliberately the ONLY
- * place expense-specific approval rules live. Changing the threshold or
- * adding a second approval tier means editing this one file; nothing in
- * the aggregate, the engine, or the handler needs to change (Phase 5.6's
- * reasoning for Strategy pattern applied concretely).
+ * TECH_DEBT #10's original "still open" business question — is ₦500,000/
+ * ₦1,000,000 actually the figure Ratel-Plus wants? — is now answered and
+ * replaced with a confirmed three-tier policy:
+ *   - up to and including ₦100,000: a single department_head, scoped to
+ *     the expense's OWN department (unchanged shape from before).
+ *   - above ₦100,000 and below ₦1,000,000: a panel of 3 DIFFERENT
+ *     department_heads.
+ *   - ₦1,000,000 and above: the same 3-department_head panel, PLUS
+ *     finance_director.
+ *
+ * Boundary semantics: "at threshold escalates," consistent with this
+ * codebase's existing convention (documented previously for the single
+ * ₦500,000 line) — <= 100,000 is tier 1, exactly 1,000,000 is tier 3, so
+ * every amount resolves to exactly one tier with no gap.
+ *
+ * The panel tiers deliberately use requiredScope: 'organization', not
+ * 'department' — a department normally has exactly one department_head,
+ * so "3 DIFFERENT department_heads" is structurally impossible if scoped
+ * to the expense's own department. 'organization' scope means any user
+ * holding department_head ANYWHERE in the org can fill a panel seat (see
+ * WorkflowEngine.recordApproval()'s scope check), and the "3 DIFFERENT"
+ * requirement is enforced separately by WorkflowEngine's chain-wide
+ * duplicate-approver check — an approver who already filled one panel
+ * seat cannot fill another.
  */
 @Injectable()
 export class ExpenseApprovalPolicy implements ApprovalPolicy {
-  // ₦500,000 in kobo. Grouped as <naira>_00 so the kobo tail is visible:
-  // 500_000 naira, then _00. One digit short here is a 10x policy error and
-  // is exactly the defect TECH_DEBT #10 records — this literal read
-  // 50_000_00n (₦50,000) while claiming to be ₦500,000, so every expense from
-  // ₦50,000 up was wrongly escalated to a finance_director. Covered by
-  // test/unit/contexts/expense/expense-approval.policy.spec.ts, which asserts
-  // the threshold in naira precisely so the same slip cannot recur silently.
-  private static readonly FINANCE_DIRECTOR_THRESHOLD_MINOR_UNITS = 500_000_00n;
+  private static readonly DEPARTMENT_HEAD_SOLE_THRESHOLD_MINOR_UNITS = 100_000_00n; // ₦100,000
+  private static readonly FINANCE_DIRECTOR_THRESHOLD_MINOR_UNITS = 1_000_000_00n; // ₦1,000,000
 
-  /**
-   * TECH_DEBT #58 — this policy is reused for BOTH ordinary expenses (always
-   * positive) and adjustments (Expense.createAdjustment() sets amount to
-   * original.amount.negate(), always negative), via the same APPROVAL_POLICY
-   * port. The comparison previously used the signed value directly, so any
-   * negative amount — i.e. every adjustment, regardless of size — was always
-   * less than the positive threshold and silently NEVER escalated to
-   * finance_director. ExpenseAdjustmentApprovalPolicy (a different, sibling
-   * policy that decides only WHETHER an adjustment needs approval at all,
-   * not the chain shape) already took the absolute value; this is the
-   * matching fix for the file that decides the chain itself.
-   */
   resolveChain(item: Approvable): ApprovalChain {
+    // Reused for both ordinary expenses (always positive) and adjustments
+    // (a signed delta — see ExpenseAdjustmentApprovalPolicy and
+    // Expense.createAdjustment()). TECH_DEBT #58's original lesson still
+    // applies: compare the magnitude, never the signed value directly.
     const absoluteAmount =
       item.amountMinorUnits < 0n ? -item.amountMinorUnits : item.amountMinorUnits;
 
-    if (absoluteAmount < ExpenseApprovalPolicy.FINANCE_DIRECTOR_THRESHOLD_MINOR_UNITS) {
+    if (absoluteAmount <= ExpenseApprovalPolicy.DEPARTMENT_HEAD_SOLE_THRESHOLD_MINOR_UNITS) {
       return ApprovalChain.of([
         { order: 1, requiredRole: 'department_head', requiredScope: 'department' },
       ]);
     }
 
+    const departmentHeadPanel: ApprovalStep[] = [
+      { order: 1, requiredRole: 'department_head', requiredScope: 'organization' },
+      { order: 2, requiredRole: 'department_head', requiredScope: 'organization' },
+      { order: 3, requiredRole: 'department_head', requiredScope: 'organization' },
+    ];
+
+    if (absoluteAmount < ExpenseApprovalPolicy.FINANCE_DIRECTOR_THRESHOLD_MINOR_UNITS) {
+      return ApprovalChain.of(departmentHeadPanel);
+    }
+
     return ApprovalChain.of([
-      { order: 1, requiredRole: 'department_head', requiredScope: 'department' },
-      { order: 2, requiredRole: 'finance_director', requiredScope: 'organization' },
+      ...departmentHeadPanel,
+      { order: 4, requiredRole: 'finance_director', requiredScope: 'organization' },
     ]);
   }
 }

@@ -53,6 +53,30 @@ export class ExpenseNotMutableError extends DomainError {
   }
 }
 
+export class InvalidAdjustmentAmountError extends DomainError {
+  readonly code = 'invalid-adjustment-amount';
+  readonly httpStatus = 400;
+
+  constructor() {
+    // Zero IS allowed — it's the GL-style full reversal/void case (the
+    // original behaviour before adjustments could carry a corrected
+    // amount). Only negative is nonsensical: an expense can't cost less
+    // than nothing.
+    super('An adjustment\'s corrected amount cannot be negative');
+  }
+}
+
+export class NoOpAdjustmentError extends DomainError {
+  readonly code = 'no-op-adjustment';
+  readonly httpStatus = 400;
+
+  constructor(originalExpenseId: string) {
+    super(
+      `The corrected amount equals expense ${originalExpenseId}'s current amount — nothing to adjust`,
+    );
+  }
+}
+
 export class Expense extends AggregateRoot {
   private constructor(private props: ExpenseProps) {
     super();
@@ -104,14 +128,25 @@ export class Expense extends AggregateRoot {
 
   /**
    * The ONLY legal way to correct a fact recorded in a closed period (Phase
-   * 1/2 decision: GL-style reversal, not destructive edit). Produces a NEW
-   * Expense linked back to the original via parentExpenseId.
+   * 1/2 decision: adjust, not destructive edit). Produces a NEW Expense
+   * linked back to the original via parentExpenseId.
+   *
+   * `newAmountMinorUnits` is the CORRECTED total, not a delta — the caller
+   * says "this expense should have been ₦X", not "adjust it by ₦Y". The
+   * persisted `amount` on the adjustment row is still the DELTA
+   * (newAmount - original.amount), exactly as it always was: reporting
+   * (expense-adjustments-summary) sums adjustment rows as signed
+   * corrections against original spend, and the DB's
+   * chk_amount_nonzero constraint expects a nonzero delta, not an
+   * absolute total. Zero is a legal corrected amount — it's the original
+   * GL-style full reversal/void, now just the newAmount=0 special case of
+   * the same general mechanism rather than the only thing this method
+   * could do.
    *
    * Whether the adjustment needs re-approval is NOT this aggregate's call —
-   * that's a business policy decision (e.g. "adjustments above ₦500,000, or
-   * ones flagged high-risk, require sign-off; small corrections don't").
-   * The caller (application handler, piece 2/3) resolves that via an
-   * AdjustmentApprovalPolicy and passes the answer in as `requiresApproval`.
+   * that's a business policy decision (increases need sign-off, decreases
+   * don't — see ExpenseAdjustmentApprovalPolicy). The caller (application
+   * handler) resolves that and passes the answer in as `requiresApproval`.
    * This keeps the aggregate policy-agnostic — exactly the separation
    * enforced in submit()/approve()/reject() above.
    */
@@ -120,13 +155,23 @@ export class Expense extends AggregateRoot {
     reason: string;
     currentOpenPeriodId: string;
     expenseNumber: string;
+    newAmountMinorUnits: bigint;
     requiresApproval: boolean;
   }): Expense {
     if (!input.reason || input.reason.trim().length === 0) {
       throw new AdjustmentReasonRequiredError();
     }
+    if (input.newAmountMinorUnits < 0n) {
+      throw new InvalidAdjustmentAmountError();
+    }
 
     const original = input.original.props;
+    const newAmount = Money.of(input.newAmountMinorUnits, original.amount.currencyCode);
+    const delta = newAmount.add(original.amount.negate());
+    if (delta.isZero()) {
+      throw new NoOpAdjustmentError(original.id);
+    }
+
     const now = new Date();
     const initialStatus: ExpenseStatusValue = input.requiresApproval ? 'pending_approval' : 'approved';
 
@@ -136,7 +181,7 @@ export class Expense extends AggregateRoot {
       expenseNumber: input.expenseNumber,
       status: initialStatus,
       source: original.source,
-      amount: original.amount.negate(),
+      amount: delta,
       categoryId: original.categoryId,
       vendorId: original.vendorId,
       departmentId: original.departmentId,

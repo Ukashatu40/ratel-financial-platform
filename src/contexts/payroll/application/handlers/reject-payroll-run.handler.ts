@@ -11,7 +11,10 @@ import {
 } from '../../../../shared-kernel/workflow/approval-progress-repository.port';
 import { WorkflowEngine } from '../../../../shared-kernel/workflow/workflow-engine';
 import { PAYROLL_RUN_REPOSITORY, PayrollRunRepository } from '../../domain/ports/payroll-run-repository.port';
+import { payrollRunToApprovable } from '../mappers/payroll-run-to-approvable.mapper';
 import { RejectPayrollRunCommand } from '../commands/reject-payroll-run.command';
+
+const DEFAULT_CURRENCY = 'NGN';
 
 @Injectable()
 export class RejectPayrollRunHandler implements CommandHandler<RejectPayrollRunCommand, void> {
@@ -37,7 +40,12 @@ export class RejectPayrollRunHandler implements CommandHandler<RejectPayrollRunC
       const progress = await this.progressRepo.findByItemId(run.id, tx);
       if (!progress) throw new EntityNotFoundError('ApprovalProgress', run.id);
 
-      this.workflowEngine.recordRejection(progress, cmd.approverId, cmd.reason);
+      await this.workflowEngine.recordRejection(
+        payrollRunToApprovable(run, DEFAULT_CURRENCY),
+        progress,
+        cmd.approverId,
+        cmd.reason,
+      );
       // reject() returns the run to 'draft' (piece 1's confirmed design) —
       // the payroll admin can now addPayslip/edit and resubmit, which will
       // call progressRepo.initialize() fresh next time, not reuse this one.

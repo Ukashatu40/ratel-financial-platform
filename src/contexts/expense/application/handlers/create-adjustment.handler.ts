@@ -56,6 +56,7 @@ export class CreateAdjustmentHandler implements CommandHandler<
       }
 
       const requiresApproval = this.adjustmentPolicy.requiresApproval(
+        cmd.newAmountMinorUnits,
         original.amount.minorUnits,
         cmd.reason,
       );
@@ -66,6 +67,7 @@ export class CreateAdjustmentHandler implements CommandHandler<
         reason: cmd.reason,
         currentOpenPeriodId: openPeriod.id,
         expenseNumber,
+        newAmountMinorUnits: cmd.newAmountMinorUnits,
         requiresApproval,
       });
 

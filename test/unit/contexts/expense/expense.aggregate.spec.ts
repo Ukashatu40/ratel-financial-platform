@@ -3,6 +3,8 @@ import {
   AdjustmentReasonRequiredError,
   Expense,
   ExpenseNotMutableError,
+  InvalidAdjustmentAmountError,
+  NoOpAdjustmentError,
 } from '../../../../src/contexts/expense/domain/aggregates/expense.aggregate';
 import { InvalidStateTransitionError } from '../../../../src/shared-kernel/errors/domain-error';
 import { Money } from '../../../../src/shared-kernel/money/money.vo';
@@ -162,24 +164,82 @@ describe('Expense aggregate', () => {
           reason: '',
           currentOpenPeriodId: 'period-2',
           expenseNumber: 'EXP-ADJ-1',
+          newAmountMinorUnits: 80000n,
           requiresApproval: false,
         }),
       ).toThrow(AdjustmentReasonRequiredError);
     });
 
-    it('produces an inverse-signed amount linked to the original', () => {
+    it('rejects a negative corrected amount', () => {
+      const original = buildDraftExpense();
+      expect(() =>
+        Expense.createAdjustment({
+          original,
+          reason: 'Nonsensical amount',
+          currentOpenPeriodId: 'period-2',
+          expenseNumber: 'EXP-ADJ-1',
+          newAmountMinorUnits: -1n,
+          requiresApproval: false,
+        }),
+      ).toThrow(InvalidAdjustmentAmountError);
+    });
+
+    it('rejects a corrected amount equal to the original — nothing to adjust', () => {
+      const original = buildDraftExpense(); // amount: 50000n NGN
+      expect(() =>
+        Expense.createAdjustment({
+          original,
+          reason: 'No actual change',
+          currentOpenPeriodId: 'period-2',
+          expenseNumber: 'EXP-ADJ-1',
+          newAmountMinorUnits: 50000n,
+          requiresApproval: false,
+        }),
+      ).toThrow(NoOpAdjustmentError);
+    });
+
+    it('computes a POSITIVE delta as (newAmount - original) for an increase, linked to the original', () => {
       const original = buildDraftExpense(); // amount: 50000n NGN
       const adjustment = Expense.createAdjustment({
         original,
-        reason: 'Duplicate entry correction',
+        reason: 'Under-recorded the original cost',
         currentOpenPeriodId: 'period-2',
         expenseNumber: 'EXP-ADJ-1',
+        newAmountMinorUnits: 80000n,
+        requiresApproval: true,
+      });
+
+      expect(adjustment.amount.minorUnits).toBe(30000n);
+      expect(adjustment.toProps().parentExpenseId).toBe(original.id);
+      expect(adjustment.periodId).toBe('period-2'); // lands in the CURRENT open period, not the original's
+    });
+
+    it('computes a NEGATIVE delta as (newAmount - original) for a decrease', () => {
+      const original = buildDraftExpense(); // amount: 50000n NGN
+      const adjustment = Expense.createAdjustment({
+        original,
+        reason: 'Over-recorded the original cost',
+        currentOpenPeriodId: 'period-2',
+        expenseNumber: 'EXP-ADJ-1',
+        newAmountMinorUnits: 20000n,
+        requiresApproval: false,
+      });
+
+      expect(adjustment.amount.minorUnits).toBe(-30000n);
+    });
+
+    it('a full reversal (newAmount: 0) still works — the original GL-reversal behaviour, now the zero case of the general mechanism', () => {
+      const original = buildDraftExpense(); // amount: 50000n NGN
+      const adjustment = Expense.createAdjustment({
+        original,
+        reason: 'Void entirely',
+        currentOpenPeriodId: 'period-2',
+        expenseNumber: 'EXP-ADJ-1',
+        newAmountMinorUnits: 0n,
         requiresApproval: false,
       });
 
       expect(adjustment.amount.minorUnits).toBe(-50000n);
-      expect(adjustment.toProps().parentExpenseId).toBe(original.id);
-      expect(adjustment.periodId).toBe('period-2'); // lands in the CURRENT open period, not the original's
     });
 
     it('sets status to approved when requiresApproval is false', () => {
@@ -189,6 +249,7 @@ describe('Expense aggregate', () => {
         reason: 'Small correction',
         currentOpenPeriodId: 'period-2',
         expenseNumber: 'EXP-ADJ-1',
+        newAmountMinorUnits: 40000n,
         requiresApproval: false,
       });
       expect(adjustment.status).toBe('approved');
@@ -201,6 +262,7 @@ describe('Expense aggregate', () => {
         reason: 'Large correction requiring sign-off',
         currentOpenPeriodId: 'period-2',
         expenseNumber: 'EXP-ADJ-1',
+        newAmountMinorUnits: 200000n,
         requiresApproval: true,
       });
       expect(adjustment.status).toBe('pending_approval');
@@ -213,6 +275,7 @@ describe('Expense aggregate', () => {
         reason: 'Needs approval',
         currentOpenPeriodId: 'period-2',
         expenseNumber: 'EXP-ADJ-1',
+        newAmountMinorUnits: 200000n,
         requiresApproval: true,
       });
       const eventTypes = adjustment.pullDomainEvents().map((e) => e.type);
@@ -226,6 +289,7 @@ describe('Expense aggregate', () => {
         reason: 'No approval needed',
         currentOpenPeriodId: 'period-2',
         expenseNumber: 'EXP-ADJ-1',
+        newAmountMinorUnits: 20000n,
         requiresApproval: false,
       });
       const eventTypes = adjustment.pullDomainEvents().map((e) => e.type);

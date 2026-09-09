@@ -108,6 +108,7 @@ describe('PrismaExpenseRepository (integration)', () => {
       reason: 'Duplicate correction',
       currentOpenPeriodId: periodId,
       expenseNumber: 'EXP-000002',
+      newAmountMinorUnits: 0n, // full reversal, matching the original assertion below
       requiresApproval: false,
     });
     await prisma.$transaction((tx) => repo.save(adjustment, tx));

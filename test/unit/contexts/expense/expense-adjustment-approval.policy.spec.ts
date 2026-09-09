@@ -3,10 +3,12 @@ import { ExpenseAdjustmentApprovalPolicy } from '../../../../src/contexts/expens
 import { describe, expect, it, beforeEach } from '@jest/globals';
 
 /**
- * Companion to expense-approval.policy.spec.ts. This policy answers "does
- * this adjustment need re-approval at all" and, like its sibling, had no
- * coverage until TECH_DEBT #10 — which is how its constant shipped 10x too
- * small (₦100,000 instead of the documented ₦1,000,000).
+ * Companion to expense-approval.policy.spec.ts. Redesigned from a fixed
+ * ₦1,000,000 magnitude threshold (TECH_DEBT #10) to a pure directional
+ * rule: approval is required if, and only if, the corrected amount is
+ * GREATER than the original. No magnitude floor — a ₦1 increase requires
+ * approval exactly like a ₦10,000,000 one; a decrease of any size,
+ * including a full reversal to zero, does not.
  *
  * Amounts are written in naira and converted, so the kobo relationship is
  * asserted rather than implied.
@@ -20,61 +22,64 @@ describe('ExpenseAdjustmentApprovalPolicy', () => {
     policy = new ExpenseAdjustmentApprovalPolicy();
   });
 
-  describe('the ₦1,000,000 re-approval threshold', () => {
-    it('does not require approval just BELOW the threshold (₦999,999)', () => {
-      expect(policy.requiresApproval(naira(999_999n), 'correction')).toBe(false);
+  describe('increases — require approval, regardless of magnitude', () => {
+    it('requires approval for a one-kobo increase', () => {
+      expect(policy.requiresApproval(naira(100n) + 1n, naira(100n), 'tiny correction')).toBe(true);
     });
 
-    it('requires approval EXACTLY AT the threshold (₦1,000,000)', () => {
-      // Pins the `>=` boundary: at-threshold requires approval.
-      expect(policy.requiresApproval(naira(1_000_000n), 'correction')).toBe(true);
+    it('requires approval for a huge increase', () => {
+      expect(policy.requiresApproval(naira(10_000_000n), naira(1n), 'huge correction')).toBe(true);
     });
 
-    it('requires approval one kobo above the threshold', () => {
-      expect(policy.requiresApproval(naira(1_000_000n) + 1n, 'correction')).toBe(true);
-    });
-
-    it('sets the threshold at ₦1,000,000, NOT ₦100,000 (TECH_DEBT #10)', () => {
-      // The regression pin for the 10x defect. Under the old constant
-      // (100_000_00n = ₦100,000) every one of these wrongly required
-      // re-approval.
-      expect(policy.requiresApproval(naira(100_000n), 'correction')).toBe(false);
-      expect(policy.requiresApproval(naira(500_000n), 'correction')).toBe(false);
-      expect(policy.requiresApproval(naira(999_999n), 'correction')).toBe(false);
-    });
-
-    it('does not require approval for a zero adjustment', () => {
-      expect(policy.requiresApproval(0n, 'no-op')).toBe(false);
+    it('requires approval for an increase from a zero original', () => {
+      expect(policy.requiresApproval(naira(1_000n), 0n, 'first real amount recorded')).toBe(true);
     });
   });
 
-  describe('negative adjustments (reversals)', () => {
-    // The policy compares the ABSOLUTE value, so a large reversal escalates
-    // exactly like a large increase. Nothing covered this branch before.
-    it('requires approval for a large negative adjustment', () => {
-      expect(policy.requiresApproval(-naira(1_000_000n), 'reversal')).toBe(true);
-      expect(policy.requiresApproval(-naira(5_000_000n), 'reversal')).toBe(true);
+  describe('decreases and full reversals — never require approval, regardless of magnitude', () => {
+    it('does not require approval for a one-kobo decrease', () => {
+      expect(policy.requiresApproval(naira(100n) - 1n, naira(100n), 'tiny correction')).toBe(false);
     });
 
-    it('does not require approval for a small negative adjustment', () => {
-      expect(policy.requiresApproval(-naira(999_999n), 'reversal')).toBe(false);
+    it('does not require approval for a huge decrease', () => {
+      expect(policy.requiresApproval(naira(1n), naira(10_000_000n), 'huge correction')).toBe(false);
     });
 
-    it('treats a negative and positive adjustment of equal magnitude identically', () => {
-      const magnitude = naira(2_000_000n);
-      expect(policy.requiresApproval(-magnitude, 'reversal')).toBe(
-        policy.requiresApproval(magnitude, 'increase'),
+    it('does not require approval for a full reversal to zero, no matter the original size', () => {
+      expect(policy.requiresApproval(0n, naira(10_000_000n), 'full void')).toBe(false);
+    });
+  });
+
+  describe('no change', () => {
+    it('does not require approval when the new amount equals the original', () => {
+      // In practice Expense.createAdjustment() rejects this case entirely
+      // (NoOpAdjustmentError) before this policy would ever be asked — but
+      // the policy's own comparison (`>`) is false for equal values
+      // regardless, so this is pinned directly rather than only implied.
+      expect(policy.requiresApproval(naira(500_000n), naira(500_000n), 'no actual change')).toBe(
+        false,
       );
     });
+  });
+
+  it('sets the rule on the comparison, NOT a ₦1,000,000 magnitude floor (TECH_DEBT #10)', () => {
+    // The regression pin for the OLD design: under the previous fixed
+    // threshold, none of these small increases would have required
+    // approval at all. Under the new rule, every increase does.
+    expect(policy.requiresApproval(naira(100n), naira(50n), 'small increase')).toBe(true);
+    expect(policy.requiresApproval(naira(100_000n), naira(99_999n), 'small increase')).toBe(true);
+    // And, symmetrically, the old design WOULD have required approval for
+    // a decrease past ₦1,000,000 — the new rule never does.
+    expect(policy.requiresApproval(naira(1n), naira(5_000_000n), 'huge decrease')).toBe(false);
   });
 
   it('ignores the reason string entirely', () => {
     // `reason` is accepted but deliberately unused (`_reason`). Pinning that
     // means a future policy that DOES branch on reason has to change this
     // expectation rather than silently changing behaviour.
-    const belowThreshold = naira(1_000n);
     for (const reason of ['typo', '', 'FRAUD', 'a'.repeat(500)]) {
-      expect(policy.requiresApproval(belowThreshold, reason)).toBe(false);
+      expect(policy.requiresApproval(naira(200n), naira(100n), reason)).toBe(true);
+      expect(policy.requiresApproval(naira(100n), naira(200n), reason)).toBe(false);
     }
   });
 });

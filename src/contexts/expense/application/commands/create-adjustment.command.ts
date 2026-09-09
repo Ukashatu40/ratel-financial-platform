@@ -4,5 +4,7 @@ export class CreateAdjustmentCommand {
     readonly originalExpenseId: string,
     readonly organizationId: string,
     readonly reason: string,
+    // The corrected total, not a delta — see Expense.createAdjustment().
+    readonly newAmountMinorUnits: bigint,
   ) {}
 }

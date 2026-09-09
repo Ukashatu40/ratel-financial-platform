@@ -2,21 +2,33 @@
 import { Injectable } from '@nestjs/common';
 import { AdjustmentApprovalPolicy } from '../../../../shared-kernel/workflow/adjustment-approval-policy.port';
 
+/**
+ * Redesigned, not just re-thresholded: this used to gate on the ABSOLUTE
+ * SIZE of the adjustment against a fixed ₦1,000,000 figure (TECH_DEBT #10),
+ * regardless of direction — a huge correction DOWN needed exactly the same
+ * sign-off as a huge correction UP. Replaced with a pure directional rule:
+ * approval is required if, and only if, the corrected amount is GREATER
+ * than what was originally recorded. A correction that reduces or exactly
+ * repeats the original amount is a conservative move (never a NEW
+ * commitment of funds beyond what was already approved) and is
+ * auto-approved regardless of size; an increase — by any amount, even one
+ * kobo — is a genuinely new commitment and always needs sign-off. No
+ * magnitude floor: "only ... when greater than the previous amount" was
+ * the explicit instruction, not "greater than previous AND above some
+ * threshold."
+ *
+ * `newAmountMinorUnits === originalAmountMinorUnits` (no actual change) is
+ * rejected earlier, at the aggregate (Expense.createAdjustment() throws
+ * NoOpAdjustmentError) — this method never needs to special-case it, since
+ * `>` is already false for equal values either way.
+ */
 @Injectable()
 export class ExpenseAdjustmentApprovalPolicy implements AdjustmentApprovalPolicy {
-  // ₦1,000,000 in kobo — deliberately higher than the finance-director
-  // threshold in ExpenseApprovalPolicy: small corrections shouldn't need
-  // re-approval, but large reversals should, per your note.
-  //
-  // Grouped as <naira>_00 so the kobo tail is visible: 1_000_000 naira, then
-  // _00. This literal read 100_000_00n (₦100,000) while claiming ₦1,000,000 —
-  // the 10x defect TECH_DEBT #10 records. The MAGNITUDE is fixed; whether
-  // ₦1,000,000 is the policy Ratel-Plus actually wants is still unconfirmed
-  // and remains open under that same item.
-  private static readonly REAPPROVAL_THRESHOLD_MINOR_UNITS = 1_000_000_00n;
-
-  requiresApproval(amountMinorUnits: bigint, _reason: string): boolean {
-    const absolute = amountMinorUnits < 0n ? -amountMinorUnits : amountMinorUnits;
-    return absolute >= ExpenseAdjustmentApprovalPolicy.REAPPROVAL_THRESHOLD_MINOR_UNITS;
+  requiresApproval(
+    newAmountMinorUnits: bigint,
+    originalAmountMinorUnits: bigint,
+    _reason: string,
+  ): boolean {
+    return newAmountMinorUnits > originalAmountMinorUnits;
   }
 }

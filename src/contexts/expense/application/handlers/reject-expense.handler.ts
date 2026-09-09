@@ -11,6 +11,7 @@ import {
 } from '../../../../shared-kernel/workflow/approval-progress-repository.port';
 import { WorkflowEngine } from '../../../../shared-kernel/workflow/workflow-engine';
 import { EXPENSE_REPOSITORY, ExpenseRepository } from '../../domain/ports/expense-repository.port';
+import { expenseToApprovable } from '../mappers/expense-to-approvable.mapper';
 import { RejectExpenseCommand } from '../commands/reject-expense.command';
 
 @Injectable()
@@ -39,7 +40,12 @@ export class RejectExpenseHandler implements CommandHandler<RejectExpenseCommand
 
       // Rejection at any step ends the whole workflow — no partial-chain
       // rejection concept, unlike approval which can be mid-chain.
-      this.workflowEngine.recordRejection(progress, cmd.approverId, cmd.reason);
+      await this.workflowEngine.recordRejection(
+        expenseToApprovable(expense),
+        progress,
+        cmd.approverId,
+        cmd.reason,
+      );
       expense.reject(cmd.approverId, cmd.reason);
 
       await this.progressRepo.save(expense.id, progress, tx);

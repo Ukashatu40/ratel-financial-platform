@@ -141,7 +141,9 @@ export class ExpenseController {
     await this.cancelExpense.execute(new CancelExpenseCommand(id, user.organizationId, user.id));
   }
 
-  @ApiOperation({ summary: 'Create a GL-style reversal adjustment for a prior expense' })
+  @ApiOperation({
+    summary: 'Create a correction adjustment for a prior expense (an increase requires approval)',
+  })
   @RequirePermission('expense:adjust', { resourceType: 'expense' })
   @Post(':id/adjustments')
   async adjust(
@@ -153,7 +155,7 @@ export class ExpenseController {
     // never the client, closing the gap flagged back when this endpoint
     // was first built (piece 5 of M2).
     return this.createAdjustment.execute(
-      new CreateAdjustmentCommand(id, user.organizationId, dto.reason),
+      new CreateAdjustmentCommand(id, user.organizationId, dto.reason, BigInt(dto.newAmountMinorUnits)),
     );
   }
 

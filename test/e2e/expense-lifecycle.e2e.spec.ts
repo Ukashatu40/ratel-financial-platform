@@ -71,10 +71,48 @@ describe('Expense lifecycle (e2e)', () => {
       },
     });
 
-    // Org-scoped approver, needed for the two-step chain a large expense
-    // resolves to (ExpenseApprovalPolicy's finance_director branch). Granting
-    // finance_director its own permission gives department_head nothing extra,
-    // so the cross-department 403 test below is unaffected.
+    // Two MORE department_heads, in their own departments — needed to fill
+    // the other 2 seats of ExpenseApprovalPolicy's 3-department_head panel
+    // (> ₦100,000). department_head's expense:approve grant is organization-
+    // scoped (see prisma/seed/fixtures/role-permissions.ts's comment), so
+    // any of the three can approve any department's expense at the PERMISSION
+    // layer — WorkflowEngine's own per-step check is what still restricts the
+    // sole-approver tier (<= ₦100,000) to the expense's own department.
+    // Named distinctly from any department a specific test creates locally
+    // below (e.g. the cross-department block's own 'Sales') to avoid an
+    // (organizationId, name) unique collision.
+    const panelDeptB = await prisma.department.create({
+      data: { organizationId: orgId, name: 'Panel Dept B' },
+    });
+    const deptHead2 = await prisma.user.create({
+      data: { email: 'depthead2@e2e.test', passwordHash },
+    });
+    await prisma.departmentRoleAssignment.create({
+      data: {
+        userId: deptHead2.id,
+        organizationId: orgId,
+        role: 'department_head',
+        departmentId: panelDeptB.id,
+      },
+    });
+
+    const panelDeptC = await prisma.department.create({
+      data: { organizationId: orgId, name: 'Panel Dept C' },
+    });
+    const deptHead3 = await prisma.user.create({
+      data: { email: 'depthead3@e2e.test', passwordHash },
+    });
+    await prisma.departmentRoleAssignment.create({
+      data: {
+        userId: deptHead3.id,
+        organizationId: orgId,
+        role: 'department_head',
+        departmentId: panelDeptC.id,
+      },
+    });
+
+    // Org-scoped approver, needed for the finance_director tier a large
+    // expense resolves to (ExpenseApprovalPolicy's top tier, >= ₦1,000,000).
     const financeDirector = await prisma.user.create({
       data: { email: 'findir@e2e.test', passwordHash },
     });
@@ -85,7 +123,7 @@ describe('Expense lifecycle (e2e)', () => {
     await prisma.rolePermission.createMany({
       data: [
         { role: 'employee', permission: 'expense:create', scope: 'own' },
-        { role: 'department_head', permission: 'expense:approve', scope: 'department' },
+        { role: 'department_head', permission: 'expense:approve', scope: 'organization' },
         { role: 'finance_director', permission: 'expense:approve', scope: 'organization' },
       ],
     });
@@ -398,38 +436,7 @@ describe('Expense lifecycle (e2e)', () => {
       return createRes.body.id;
     }
 
-    it('requires a SECOND finance_director approval above the ₦500,000 threshold', async () => {
-      // First coverage anywhere of ExpenseApprovalPolicy's two-step branch —
-      // resolveChain() was never invoked by any test before this.
-      const prisma = getE2eDbClient();
-      const expenseId = await createAndSubmit(naira(600_000));
-
-      // Step 1 of 2: the department head's approval must NOT complete it.
-      const deptHeadToken = await loginAs('depthead@e2e.test');
-      await request(server)
-        .post(`/api/v1/expenses/${expenseId}/approve`)
-        .set('Authorization', `Bearer ${deptHeadToken}`)
-        .expect(201);
-
-      let dbExpense = await prisma.expense.findFirstOrThrow({ where: { id: expenseId } });
-      expect(dbExpense.status).toBe('pending_approval');
-
-      // Step 2 of 2: finance_director closes the chain.
-      const financeDirectorToken = await loginAs('findir@e2e.test');
-      await request(server)
-        .post(`/api/v1/expenses/${expenseId}/approve`)
-        .set('Authorization', `Bearer ${financeDirectorToken}`)
-        .expect(201);
-
-      dbExpense = await prisma.expense.findFirstOrThrow({ where: { id: expenseId } });
-      expect(dbExpense.status).toBe('approved');
-    });
-
-    it('completes on department_head approval alone at ₦100,000 (threshold is ₦500,000, not ₦50,000)', async () => {
-      // The regression control for the 10x defect. ₦100,000 sits BETWEEN the
-      // buggy ₦50,000 threshold and the real ₦500,000 one, so under the old
-      // constant this expense wrongly required a second approval and would
-      // still be 'pending_approval' at the end of this test.
+    it('completes on department_head approval alone at ₦100,000 — the tier-1/tier-2 boundary belongs to tier 1', async () => {
       const prisma = getE2eDbClient();
       const expenseId = await createAndSubmit(naira(100_000));
 
@@ -440,6 +447,94 @@ describe('Expense lifecycle (e2e)', () => {
         .expect(201);
 
       const dbExpense = await prisma.expense.findFirstOrThrow({ where: { id: expenseId } });
+      expect(dbExpense.status).toBe('approved');
+    });
+
+    it('requires 3 DIFFERENT department_heads above ₦100,000, none of them finance_director', async () => {
+      // First coverage anywhere of ExpenseApprovalPolicy's panel tier —
+      // resolveChain() had never been invoked with an amount in this range.
+      const prisma = getE2eDbClient();
+      const expenseId = await createAndSubmit(naira(600_000));
+
+      const deptHeadToken = await loginAs('depthead@e2e.test');
+      const deptHead2Token = await loginAs('depthead2@e2e.test');
+      const deptHead3Token = await loginAs('depthead3@e2e.test');
+
+      await request(server)
+        .post(`/api/v1/expenses/${expenseId}/approve`)
+        .set('Authorization', `Bearer ${deptHeadToken}`)
+        .expect(201);
+      let dbExpense = await prisma.expense.findFirstOrThrow({ where: { id: expenseId } });
+      expect(dbExpense.status).toBe('pending_approval');
+
+      await request(server)
+        .post(`/api/v1/expenses/${expenseId}/approve`)
+        .set('Authorization', `Bearer ${deptHead2Token}`)
+        .expect(201);
+      dbExpense = await prisma.expense.findFirstOrThrow({ where: { id: expenseId } });
+      expect(dbExpense.status).toBe('pending_approval');
+
+      // Third and final seat — finance_director is never involved in this tier.
+      await request(server)
+        .post(`/api/v1/expenses/${expenseId}/approve`)
+        .set('Authorization', `Bearer ${deptHead3Token}`)
+        .expect(201);
+      dbExpense = await prisma.expense.findFirstOrThrow({ where: { id: expenseId } });
+      expect(dbExpense.status).toBe('approved');
+    });
+
+    it('rejects a SECOND approval from the same department_head, with 403, and does not advance the chain', async () => {
+      const prisma = getE2eDbClient();
+      const expenseId = await createAndSubmit(naira(600_000));
+      const deptHeadToken = await loginAs('depthead@e2e.test');
+
+      await request(server)
+        .post(`/api/v1/expenses/${expenseId}/approve`)
+        .set('Authorization', `Bearer ${deptHeadToken}`)
+        .expect(201);
+
+      const res = await request(server)
+        .post(`/api/v1/expenses/${expenseId}/approve`)
+        .set('Authorization', `Bearer ${deptHeadToken}`)
+        .expect(403);
+      expect(res.body.type).toContain('duplicate-approver-in-chain');
+
+      const dbExpense = await prisma.expense.findFirstOrThrow({ where: { id: expenseId } });
+      expect(dbExpense.status).toBe('pending_approval');
+    });
+
+    it('requires the 3-department_head panel PLUS finance_director at ₦1,000,000 — the tier-2/tier-3 boundary belongs to tier 3', async () => {
+      const prisma = getE2eDbClient();
+      const expenseId = await createAndSubmit(naira(1_000_000));
+
+      const deptHeadToken = await loginAs('depthead@e2e.test');
+      const deptHead2Token = await loginAs('depthead2@e2e.test');
+      const deptHead3Token = await loginAs('depthead3@e2e.test');
+      const financeDirectorToken = await loginAs('findir@e2e.test');
+
+      await request(server)
+        .post(`/api/v1/expenses/${expenseId}/approve`)
+        .set('Authorization', `Bearer ${deptHeadToken}`)
+        .expect(201);
+      await request(server)
+        .post(`/api/v1/expenses/${expenseId}/approve`)
+        .set('Authorization', `Bearer ${deptHead2Token}`)
+        .expect(201);
+      await request(server)
+        .post(`/api/v1/expenses/${expenseId}/approve`)
+        .set('Authorization', `Bearer ${deptHead3Token}`)
+        .expect(201);
+
+      // All 3 panel seats filled — still pending, finance_director hasn't acted.
+      let dbExpense = await prisma.expense.findFirstOrThrow({ where: { id: expenseId } });
+      expect(dbExpense.status).toBe('pending_approval');
+
+      await request(server)
+        .post(`/api/v1/expenses/${expenseId}/approve`)
+        .set('Authorization', `Bearer ${financeDirectorToken}`)
+        .expect(201);
+
+      dbExpense = await prisma.expense.findFirstOrThrow({ where: { id: expenseId } });
       expect(dbExpense.status).toBe('approved');
     });
   });
