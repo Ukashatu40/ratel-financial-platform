@@ -1,0 +1,12 @@
+# ops/monitoring/prometheus.yml
+#
+# Scrapes the app's own Prometheus metrics endpoint (src/tracing.ts,
+# OTEL_METRICS_PORT default 9464) — no separate exporter needed, the app
+# exposes this natively already.
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: ratel-financial-platform
+    static_configs:
+      - targets: ['app:9464']

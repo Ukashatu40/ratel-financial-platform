@@ -52,24 +52,45 @@ approving an expense in Department A, and the same department's own head
 is allowed (201) — the positive-case control confirming the guard isn't
 just blocking everything indiscriminately.
 
-### 4. `audit_log_entries` append-only DB grant not applied
-**Where:** Migration for `add_outbox_context_and_audit_log`, commented out.
+### 4. ~~`audit_log_entries` append-only DB grant not applied~~ — RESOLVED
+**Where:** Migration for `add_outbox_context_and_audit_log`, was commented out.
 **What:** Phase 6.2 specified `REVOKE UPDATE, DELETE ON audit_log_entries
 FROM application_role` so even a compromised app can't rewrite history. No
-`application_role` exists in the local dev DB (connecting as `postgres`
-superuser), so this was left commented rather than failing the migration.
-**To close:** Create a real least-privilege DB role as part of Phase 10
-(Infrastructure/deployment), grant it only what the app needs, apply this
-REVOKE for real.
+`application_role` existed in any environment so far (dev, Testcontainers,
+all connecting as the `postgres` superuser), so this was left commented
+rather than failing the migration.
+**Resolved:** `ops/db/init-app-role.sh` creates a real least-privilege
+`RATEL_APP_DB_USER` role on first Postgres init (via the official image's
+`/docker-entrypoint-initdb.d/` convention), with `ALTER DEFAULT PRIVILEGES`
+so future-migration-created tables automatically get correct grants
+without this script needing to change. `ops/db/harden-audit-log.sh` then
+applies the REVOKE for real, run after every `prisma migrate deploy` by
+`ops/deploy/deploy.sh` (idempotent — REVOKE on an already-lacking grantee
+is a no-op, not an error). `docker-compose.prod.yml`'s app service
+connects via `RATEL_APP_DB_USER`, not `postgres`. Verified against a real
+Postgres container: SELECT/INSERT succeed for the app role, UPDATE/DELETE
+on `audit_log_entries` correctly return `permission denied`. See #65
+("Deployment / Infrastructure" section) for the full deployment batch
+this was part of.
 
 ### 5. Field encryption master key sourced from plain env var
 **Where:** `AesGcmEnvelopeEncryptionService`, `FIELD_ENCRYPTION_MASTER_KEY`.
 **What:** The KEK is read directly from an environment variable — fine for
 local dev, but Phase 9.4 specified real KMS/Vault-backed key management for
 production, with rotation support.
+**Confirmed decision (see #65):** deploying on a self-managed VPS with no
+managed KMS available; a real KMS/Vault integration was explicitly weighed
+against a hardened plain `.env` file and the latter was chosen as the
+minimum-viable option for now. Mitigated purely via filesystem permissions
+(`.env` owned `root:root`, `chmod 600`, never baked into the Docker image
+— see `DEPLOYMENT.md` §1.4) rather than closed. Note this key specifically
+cannot be rotated after the fact without re-encrypting existing data under
+a new key (out of scope here) — `.env.production.example` flags this and
+recommends a separate offline backup of the key itself.
 **To close:** Swap `loadKekFromBase64(config.get(...))` for a real KMS client
-call. The pure-function crypto core (`aes-gcm-envelope-crypto.ts`) was
-deliberately built KEK-source-agnostic, so this should be a contained change.
+call if/when a managed KMS becomes available. The pure-function crypto core
+(`aes-gcm-envelope-crypto.ts`) was deliberately built KEK-source-agnostic,
+so this should be a contained change.
 
 ### 6. `principal.organizationId` is derived from `roleAssignments[0]`, arbitrarily
 **Where:** `AuthService.login()`, `AuthService.refresh()`
@@ -530,6 +551,208 @@ reading them, not a claim about a race that was measured before and after.
 
 ---
 
+## Deployment / Infrastructure
+
+### 65. ~~VPS deployment: hosting on a Nigeria-based VPS, no domain/TLS yet~~ — RESOLVED
+**What it was:** Follow-up to the #64 readiness review — with dependency
+CVEs, security headers, and graceful shutdown fixed, the remaining gaps
+were entirely infrastructural: no Dockerfile, no CI/CD, no hosting
+decision, no backup/DR plan, no production monitoring, and the still-open
+#4 (audit-log DB grants — needed a real least-privilege role, which needed
+a real production Postgres to exist) and #5 (field-encryption key
+management). Four decisions were confirmed up front rather than guessed:
+no domain/TLS yet (build for plain HTTP, one-line flip to HTTPS later —
+this is *why* Caddy specifically was chosen as the reverse proxy, over
+nginx or others), a third-party transactional email API (provider-agnostic
+SMTP-auth support was enough; no specific provider was picked), a plain
+hardened `.env` for secrets rather than KMS/Vault/SOPS (see #5), and
+local-only backups rather than an off-VPS destination (see below).
+
+**1. Dockerfile.** Single build stage, full `node_modules` (including
+devDependencies) copied wholesale into the runtime stage — NOT a separate
+`npm ci --omit=dev` stage, which would skip `prisma generate` (no
+`postinstall` hook exists in `package.json`) and ship an ungenerated,
+broken Prisma client. The `prisma` CLI stays in the final image
+deliberately: `prisma migrate deploy` runs from the exact image about to
+serve traffic (`ops/deploy/deploy.sh`), which is a correctness property,
+not convenience. `CMD ["node", "dist/src/main.js"]`, deliberately not
+`npm start` — npm's process wrapping doesn't reliably forward `SIGTERM` to
+the child, which would silently defeat #64's `app.enableShutdownHooks()`.
+Built and smoke-tested for real (health check, `curl`, PID 1 confirmed).
+
+**Graceful shutdown takes ~8 seconds, empirically measured** — not
+assumed. Five BullMQ processors (`OutboxDispatchProcessor`,
+`NotificationProcessor`, `AttachmentScanProcessor`, `ImportJobProcessor`,
+`EventRedeliveryProcessor`) each hold a blocking Redis connection BullMQ
+can't interrupt mid-wait; closing them sequentially on `SIGTERM` sums to
+~8s. First test run showed a misleading 3.76s + exit 137 — investigated
+rather than accepted, and turned out to be a race (signal sent before
+bootstrap finished). Two careful re-runs (wait for the "listening" log
+line, settle 2-3s, then signal) both showed a clean 8s/exit-0 shutdown.
+`docker-compose.prod.yml`'s `app.stop_grace_period` is set to `30s`
+explicitly rather than relying on Docker's own 10s default, which was too
+close for comfort.
+
+**2. `ops/db/init-app-role.sh` + `ops/db/harden-audit-log.sh` — closes #4
+for real.** See #4's own entry above for the detail; both scripts were
+run against a real Postgres container, not just written — confirmed
+`CREATE ROLE`/`GRANT`/`ALTER DEFAULT PRIVILEGES` succeed, and
+post-migration, that `UPDATE`/`DELETE` on `audit_log_entries` correctly
+fail with `permission denied` for the app role while `SELECT`/`INSERT`
+succeed.
+
+**3. Redis had no authentication anywhere — found while designing the
+compose file, not from a test failure.** Reasoned through "does a public
+VPS's Redis need a password" and confirmed via `grep -rn "new Redis("
+src` that four separate places construct connections
+(`IdempotencyStoreService`, `RedisHealthIndicator`,
+`RateLimitModule`'s `ThrottlerStorageRedisService`, `JobsModule`'s BullMQ
+`connection`), none passing one. Added optional `REDIS_PASSWORD` to
+`env.schema.ts` and threaded it through all four; `docker-compose.prod.yml`
+sets Redis's own `--requirepass` from the same value. Verified via
+build/lint/full unit suite (438/438) green; not separately re-verified via
+integration/e2e specifically for this change since neither suite's
+Testcontainers Redis sets a password (dev/CI parity) and the connection
+code path is otherwise unchanged.
+
+**4. Production-safe seed (`prisma/seed/seed-production.ts`).** The
+existing `prisma/seed/seed.ts` creates demo departments/vendors/
+employees/salary structures and every user with a hardcoded
+`DevPassword!23` — none of that belongs in production. The production
+seed creates only what has no other way to be created: the
+`role_permissions` matrix (identical in every environment, not demo data)
+and exactly one real organization + one real `finance_director` admin
+account from `RATEL_ADMIN_EMAIL`/`RATEL_ADMIN_PASSWORD` env vars. That
+admin's `reference-data:manage` permission is enough to create every other
+real entity through the existing API — deliberately not re-implemented in
+the seed. Idempotent: re-running never overwrites an existing user's
+password.
+
+**5. Backups — local-only, per the confirmed decision.**
+`ops/backup/backup-postgres.sh` runs `pg_dump` inside the postgres
+container (as the `postgres` superuser — a backup needs to see everything
+the app role deliberately can't, e.g. `audit_log_entries` `UPDATE`s that
+never should have happened), pipes to `gzip` on the host, and prunes dumps
+older than `RATEL_BACKUP_RETENTION_DAYS` (default 14). Structured so
+adding an off-VPS destination later is one appended upload step operating
+on the same dump file, not a rewrite — deliberately not built now.
+`ops/backup/restore-postgres.sh` is the untested-in-anger counterpart:
+drops and recreates the database, requires a typed `restore` confirmation,
+and re-applies the app role's grants afterward (a restored database's
+`public` schema doesn't carry over `ALTER DEFAULT PRIVILEGES`, and the
+role's own `CREATE ROLE` can't just be re-run since Postgres roles are
+cluster-level and survive `DROP DATABASE`).
+**Known gap:** local-only backups do not protect against total VPS loss
+(disk failure, account termination) — only logical mistakes on an
+otherwise-healthy VPS. Revisit once real financial data is at stake.
+**Also known:** `restore-postgres.sh` has not been exercised against a
+real dump end-to-end — written and reasoned through carefully (see its
+own comments on the role/grant subtlety above) but not run.
+
+**6. CI (`.github/workflows/ci.yml`)** — build/lint/unit always;
+integration and e2e via Testcontainers, which GitHub-hosted `ubuntu-latest`
+runners support with no extra setup (Docker is preinstalled). Not yet
+verified by an actual push (repo has no workflow history) — the YAML is
+correct by inspection and mirrors the exact `npm` scripts already proven
+to work locally, but "runs green in GitHub's actual environment" is
+unverified.
+
+**7. Deploy workflow (`.github/workflows/deploy.yml`) — manual
+`workflow_dispatch` only, deliberately not auto-deploy-on-push.** A
+financial system-of-record's production deploys should be a deliberate
+action, not a side effect of a merge — this specific sub-decision was my
+own recommendation, not separately re-confirmed with the user beyond the
+general "give options, flag the recommended one" instruction this whole
+batch was built under. Requires `VPS_HOST`/`VPS_USER`/`VPS_SSH_KEY`/
+`VPS_DEPLOY_PATH` repository secrets to be configured before it can run —
+**not yet done**, since that requires VPS access this environment doesn't
+have. `ops/deploy/deploy.sh` (what it SSHes in and runs) IS fully
+verifiable and self-contained regardless of whether the workflow's
+secrets are ever configured.
+
+**8. Monitoring — optional add-on, not required.**
+`docker-compose.monitoring.yml` adds Prometheus (scraping the app's
+already-native `:9464/metrics`) + Grafana, reachable at `/grafana/` behind
+Caddy once a commented block in `ops/caddy/Caddyfile` is uncommented. Not
+started by default; `docker-compose.prod.yml` runs without it. A free
+external uptime checker (e.g. UptimeRobot) against `/health/liveness` is
+documented in `DEPLOYMENT.md` as the zero-setup baseline underneath it.
+
+**Verification — the full `docker-compose.prod.yml` stack WAS brought up
+end-to-end for real** (app + postgres + redis + minio + clamav + caddy
+together, real generated passwords, real migrations, real seed, real
+`curl` through Caddy on port 80), which is what caught two real bugs that
+reasoning-through alone had missed:
+
+**Bug A — `prisma migrate deploy` cannot run as the app's own DB role.**
+`ops/deploy/deploy.sh` originally ran migrations through the app
+container's normal `DATABASE_URL` (the `RATEL_APP_DB_USER` role). That
+role deliberately has no `CREATE` grant (only the DML grants
+`init-app-role.sh`'s `ALTER DEFAULT PRIVILEGES` sets up), so migrations
+failed with `permission denied for schema public` — correct behavior from
+the least-privilege role, wrong assumption about who runs migrations.
+Fixed by having `deploy.sh` override `DATABASE_URL` to the `postgres`
+superuser for that one command only (`. ./.env` then an inline
+`-e DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@...`); the
+running app itself still only ever connects as the least-privilege role.
+Re-verified: all 25 migrations applied cleanly, then `harden-audit-log.sh`
+confirmed SELECT/INSERT succeed and UPDATE/DELETE on `audit_log_entries`
+correctly return `permission denied` for the app role against the real
+post-migration table.
+
+**Bug B — `ts-node` silently no-ops on a compile error inside this exact
+container (Node 24.20.0), instead of failing loudly.** Running
+`npm run prisma:seed:production` in the built image produced zero output
+and exit code 0 — looked like a fast, quiet success. It wasn't: the
+underlying compile was actually failing (`TS5109: moduleResolution must
+be NodeNext when module is NodeNext`, a ts-node 10.9.2 / TypeScript 5.9.3
+interaction that only manifests on this specific Node patch — the
+identical code runs fine on the host's Node 24.12.0, and the *existing*
+`prisma db seed` script surfaces its own compile errors loudly rather than
+swallowing them, so this is narrower than "ts-node is broken here," but no
+less dangerous for being narrow). A silently-swallowed failure in a
+*deploy script* is a worse defect than a loud one — this would have looked
+like a successful production seed while creating nothing. Fixed by baking
+`TS_NODE_TRANSPILE_ONLY=true` and an explicit `TS_NODE_COMPILER_OPTIONS`
+override (`{"module":"CommonJS","moduleResolution":"node10"}`, singly
+double-quoted so it survives `npm run`'s `sh -c` invocation intact — an
+earlier attempt using ts-node's `--compiler-options` CLI flag directly hit
+a second, separate bug where the unquoted JSON got mangled by the shell)
+directly into the `prisma:seed:production` npm script. Re-verified twice
+after the fix: a successful run prints the expected output and exits 0,
+and a deliberately-broken run (`RATEL_ADMIN_EMAIL` unset) now prints the
+real error and exits 1 — confirming the fix restores real failure
+signaling, not just quiets the specific error that was found.
+
+**Bug C (smaller) — `REDIS_PORT` had no value in the production compose
+file at all.** `docker-compose.prod.yml`'s `app` service overrode
+`REDIS_HOST` to `redis` but never set `REDIS_PORT`, and `env.schema.ts`
+requires it with no default — boot failed immediately with
+`Invalid environment configuration: REDIS_PORT: Invalid input: expected
+number, received NaN`. Added `REDIS_PORT: 6379` alongside `REDIS_HOST` in
+the same `environment:` block.
+
+After all three fixes: `curl` through Caddy on port 80 confirmed
+`/health/liveness` and `/health/readiness` both `200`, `readiness`
+reporting both `database` and `redis` as `up`; a real login as the seeded
+`finance_director` admin returned a valid access+refresh token pair;
+security headers (`X-Content-Type-Options`, `X-Frame-Options`) present
+through the proxy, no `Server`/`X-Powered-By` leak. Graceful shutdown was
+re-confirmed against this exact compose file too: `docker compose stop
+app` took 8s and exited 0 — matching the number this entry's Dockerfile
+section predicted, now confirmed against the real production stop path,
+not just a bare `docker run`.
+
+**Still not done, and explicitly flagged rather than silently skipped:**
+`restore-postgres.sh` has not been run against a real dump; the CI
+workflow has not been exercised by an actual GitHub push; the deploy
+workflow's repository secrets have not been configured (needs VPS access
+this environment doesn't have), so it has never actually deployed
+anything to a real VPS. Everything else in this entry has now been
+verified end-to-end, not just built and reasoned through.
+
+---
+
 ## Audit Trail
 
 ### 7. ~~Hash chain read-then-write is not atomic~~ — RESOLVED
@@ -546,6 +769,8 @@ serialization): 20 genuinely concurrent `record()` calls via `Promise.all`
 produce an unbroken chain — every entry's `prevHash` matches the previous
 entry's `entryHash` exactly, and all 20 `entryHash` values are unique. This
 is the scenario that would have reliably corrupted the chain before the fix.
+
+---
 
 ### 7b. ~~Audit chain is a single global sequence across all organizations, not per-organization~~ — RESOLVED
 `AuditLogService.record()` now scopes both the chain-walk query

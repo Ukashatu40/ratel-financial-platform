@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main, development]
+  pull_request:
+    branches: [main, development]
+
+# Cancel superseded runs on the same branch/PR rather than letting an old
+# push's CI keep burning minutes after a newer push already exists.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-lint-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # --legacy-peer-deps: pre-existing @fastify/static peer conflict
+      # between @nestjs/swagger and @nestjs/platform-fastify, present on a
+      # clean checkout independent of any app code — same reasoning as the
+      # Dockerfile's build stage (see TECH_DEBT.md).
+      - run: npm ci --legacy-peer-deps
+
+      - run: npx prisma generate
+
+      - run: npm run build
+
+      - run: npm run lint
+
+      - run: npm test -- --ci
+
+  integration:
+    runs-on: ubuntu-latest
+    needs: build-lint-unit
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci --legacy-peer-deps
+
+      - run: npx prisma generate
+
+      # Real Postgres via Testcontainers (test/integration/setup/global-setup.ts)
+      # — Docker is preinstalled on GitHub-hosted ubuntu-latest runners, no
+      # extra setup needed for Testcontainers to work.
+      - run: npm run test:integration -- --ci
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: build-lint-unit
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci --legacy-peer-deps
+
+      - run: npx prisma generate
+
+      # Real Postgres + Redis + MinIO + ClamAV via Testcontainers
+      # (test/e2e/setup/global-setup.ts). ClamAV's freshclam signature
+      # download is the slow part — matches the 180s start_period already
+      # used everywhere else this image appears (docker/docker-compose.yml,
+      # docker-compose.prod.yml), so no extra timeout tuning here.
+      - run: npm run test:e2e -- --ci
