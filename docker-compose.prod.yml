@@ -1,0 +1,160 @@
+# docker-compose.prod.yml
+#
+# Single-VPS production stack. Deliberately different from
+# docker/docker-compose.yml (dev) in every way that matters for running on
+# a public host: no Mailpit (a real transactional email provider is used
+# instead — see .env.production.example's SMTP_* vars), Redis requires a
+# password, Postgres creates a least-privileged app role on first init
+# (ops/db/init-app-role.sh) rather than the app connecting as the `postgres`
+# superuser, nothing except Caddy publishes a port to the host, and Caddy
+# terminates the connection so the app itself never needs to know about
+# TLS.
+#
+# Compose auto-loads a `.env` file sitting next to this one — copy
+# .env.production.example to `.env` on the VPS and fill it in (see
+# DEPLOYMENT.md). Both the infra services below (via ${VAR} interpolation)
+# and the app service (via env_file) read the same file.
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Overrides whatever REDIS_HOST/DATABASE_URL a shared .env might set
+      # for local/dev use — inside this compose network the only correct
+      # hostnames are the other services' names below, never localhost.
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      DATABASE_URL: postgresql://${RATEL_APP_DB_USER}:${RATEL_APP_DB_PASSWORD}@postgres:5432/ratel_financial?schema=public
+      OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      CLAMAV_HOST: clamav
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Empirically measured (see TECH_DEBT.md): 5 BullMQ processors, each with
+    # a blocking Redis connection that can't be interrupted mid-wait, take
+    # ~8s in sequence to close cleanly during SIGTERM. Docker's own default
+    # is 10s, which is too close for comfort on a loaded VPS — set generous
+    # headroom explicitly rather than risk a SIGKILL that abandons
+    # in-flight jobs.
+    stop_grace_period: 30s
+    networks:
+      - internal
+    # No `ports:` — only Caddy is reachable from outside this VPS. The app
+    # is reached at http://app:3000 from inside the `internal` network only.
+
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ratel_financial
+      RATEL_APP_DB_USER: ${RATEL_APP_DB_USER}
+      RATEL_APP_DB_PASSWORD: ${RATEL_APP_DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Postgres's official image runs everything under here, in
+      # filename-sorted order, ONCE on first init against an empty data
+      # directory. `harden-audit-log.sh` deliberately is NOT also mounted
+      # here — it needs audit_log_entries to exist first, which only
+      # `prisma migrate deploy` creates, so it's run manually by
+      # ops/deploy/deploy.sh after migrations instead.
+      - ./ops/db/init-app-role.sh:/docker-entrypoint-initdb.d/10-init-app-role.sh:ro
+    networks:
+      - internal
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    # No `ports:` — reach it for operator work via
+    # `docker compose -f docker-compose.prod.yml exec postgres psql ...`,
+    # never by exposing 5432 to the public internet.
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # requirepass, not a redis.conf file — this is the one and only setting
+    # this deployment needs beyond the image default, and env-var
+    # interpolation keeps the password out of a second file to manage.
+    command: ['redis-server', '--requirepass', '${REDIS_PASSWORD}', '--appendonly', 'yes']
+    volumes:
+      - redis_data:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ['CMD', 'redis-cli', '-a', '${REDIS_PASSWORD}', '--no-auth-warning', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${OBJECT_STORAGE_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${OBJECT_STORAGE_SECRET_KEY}
+    volumes:
+      - minio_data:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    # Console (9001) intentionally not published — attachments are reached
+    # through the app's own API, never directly by an end user.
+
+  clamav:
+    image: clamav/clamav:stable
+    restart: unless-stopped
+    volumes:
+      - clamav_data:/var/lib/clamav
+    networks:
+      - internal
+    healthcheck:
+      test: ['CMD', 'clamdcheck.sh']
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./ops/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge
+    # Named explicitly (rather than left to compose's default
+    # `<project>_internal` derivation) so docker-compose.monitoring.yml can
+    # reference it by a fixed name regardless of which directory this repo
+    # is checked out into or what compose project name that implies.
+    name: ratel_internal
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  clamav_data:
+  caddy_data:
+  caddy_config:

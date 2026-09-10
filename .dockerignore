@@ -1,0 +1,30 @@
+node_modules
+dist
+coverage
+.git
+.github
+.env
+.env.*
+!.env.example
+!.env.production.example
+*.log
+npm-debug.log*
+.DS_Store
+.vscode
+.idea
+# NOT excluding test/ — tsconfig.json has no explicit rootDir/outDir, so
+# TypeScript infers rootDir from every included .ts file it can see,
+# test/ included (confirmed: this is why `nest build` already emits
+# dist/src/main.js rather than dist/main.js — the inferred rootDir is the
+# project root, anchored partly by test/ and prisma.config.ts sitting
+# alongside src/). Excluding test/ from this build context risks silently
+# changing that inference and breaking the exact path main.ts's CMD below
+# depends on. TECH_DEBT #45 already flags setting an explicit rootDir/
+# outDir as the proper fix, "alongside the first Dockerfile" — deliberately
+# NOT taking that side-quest here; keeping test/ present is the zero-risk
+# choice that doesn't require touching tsconfig at all.
+docker
+ops
+DEPLOYMENT.md
+PHASES.md
+TECH_DEBT.md

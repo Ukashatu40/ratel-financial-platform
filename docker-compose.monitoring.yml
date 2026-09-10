@@ -1,0 +1,45 @@
+# docker-compose.monitoring.yml
+#
+# Optional add-on, not part of the core stack — start it alongside
+# docker-compose.prod.yml with:
+#
+#   docker compose -f docker-compose.prod.yml -f docker-compose.monitoring.yml up -d
+#
+# The app already exposes Prometheus-format metrics natively (src/tracing.ts,
+# OTEL_METRICS_PORT, default 9464) — this file just adds a Prometheus
+# server to scrape that endpoint and a Grafana instance to visualize it.
+# Nothing here is required for the app to run; it's purely for operator
+# visibility. Both are internal-only (no host ports) except Grafana's own
+# UI, reached through Caddy rather than a raw published port.
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    volumes:
+      - ./ops/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - internal
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      # Served at /grafana/ behind Caddy (see ops/caddy/Caddyfile's
+      # commented-out block) rather than its own published port.
+      GF_SERVER_ROOT_URL: '%(protocol)s://%(domain)s/grafana/'
+      GF_SERVER_SERVE_FROM_SUB_PATH: 'true'
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - internal
+
+networks:
+  internal:
+    external: true
+    name: ratel_internal
+
+volumes:
+  prometheus_data:
+  grafana_data:

@@ -21,7 +21,8 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:migrate:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
-    "prisma:seed": "ts-node prisma/seed/seed.ts"
+    "prisma:seed": "ts-node prisma/seed/seed.ts",
+    "prisma:seed:production": "TS_NODE_TRANSPILE_ONLY=true TS_NODE_COMPILER_OPTIONS='{\"module\":\"CommonJS\",\"moduleResolution\":\"node10\"}' ts-node prisma/seed/seed-production.ts"
   },
   "keywords": [],
   "author": "",
