@@ -37,6 +37,8 @@ describe('NotificationSubscriber — #32 additions', () => {
     };
     queue = { add: jest.fn().mockResolvedValue(undefined) };
     prisma = {
+      expense: { findFirst: jest.fn() },
+      user: { findUnique: jest.fn() },
       payrollRun: { findFirst: jest.fn() },
       financialPeriod: { findFirst: jest.fn() },
       rolePermission: { findMany: jest.fn() },
@@ -64,6 +66,85 @@ describe('NotificationSubscriber — #32 additions', () => {
         'PeriodReopened',
       ].sort(),
     );
+  });
+
+  describe('ExpenseApproved — approver name resolution', () => {
+    // Regression coverage for the bug this fixes: `approverName` was the raw
+    // `approverId` UUID interpolated straight into the email ("...was
+    // approved by 69cc7531-..."). None of these four cases were covered
+    // before — the handler had no dedicated test at all.
+    const expense = {
+      id: 'expense-1',
+      sourceActorId: 'requester-1',
+      expenseNumber: 'EXP-000001',
+      currency: 'NGN',
+      amountMinorUnits: 250000n,
+    };
+
+    beforeEach(() => {
+      prisma.expense.findFirst.mockResolvedValue(expense);
+    });
+
+    it('uses the linked Employee.fullName when the approver has one', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        id: 'approver-1',
+        email: 'approver@ratel-plus.com',
+        employee: { fullName: 'Amaka Okafor' },
+      });
+
+      await dispatch(event('ExpenseApproved', { approverId: 'approver-1' }));
+
+      expect(enqueued()).toEqual([
+        {
+          recipientUserId: 'requester-1',
+          templateType: 'ExpenseApproved',
+          templateData: {
+            expenseNumber: 'EXP-000001',
+            amount: 'NGN 2500.00',
+            approverName: 'Amaka Okafor',
+          },
+        },
+      ]);
+      expect(prisma.user.findUnique).toHaveBeenCalledWith({
+        where: { id: 'approver-1' },
+        include: { employee: true },
+      });
+    });
+
+    it('falls back to the User.email when there is no linked Employee', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        id: 'approver-1',
+        email: 'approver@ratel-plus.com',
+        employee: null,
+      });
+
+      await dispatch(event('ExpenseApproved', { approverId: 'approver-1' }));
+
+      expect(enqueued()[0].templateData.approverName).toBe('approver@ratel-plus.com');
+    });
+
+    it('falls back to a generic phrase when the approver User record no longer exists', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await dispatch(event('ExpenseApproved', { approverId: 'approver-1' }));
+
+      expect(enqueued()[0].templateData.approverName).toBe('a manager');
+    });
+
+    it('falls back to a generic phrase when the event carries no approverId at all', async () => {
+      await dispatch(event('ExpenseApproved', {}));
+
+      expect(enqueued()[0].templateData.approverName).toBe('a manager');
+      expect(prisma.user.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('enqueues nothing when the expense no longer exists', async () => {
+      prisma.expense.findFirst.mockResolvedValue(null);
+
+      await dispatch(event('ExpenseApproved', { approverId: 'approver-1' }));
+
+      expect(queue.add).not.toHaveBeenCalled();
+    });
   });
 
   describe('PayrollRunRejected', () => {

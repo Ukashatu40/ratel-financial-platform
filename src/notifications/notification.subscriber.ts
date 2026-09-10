@@ -80,9 +80,32 @@ export class NotificationSubscriber implements OnModuleInit {
       templateData: {
         expenseNumber: expense.expenseNumber,
         amount: `${expense.currency} ${(Number(expense.amountMinorUnits) / 100).toFixed(2)}`,
-        approverName: (event.payload['approverId'] as string) ?? 'a manager',
+        approverName: await this.resolveDisplayName(event.payload['approverId'] as string | undefined),
       },
     });
+  }
+
+  /**
+   * Was `event.payload['approverId'] as string` used DIRECTLY as the
+   * "Approved By" name — the raw UUID, printed straight into the email
+   * ("...was approved by 69cc7531-9067-4bae-872e-5998b8ef430f."). A `User`
+   * has no name field of its own (`Employee.fullName` is where a human
+   * name lives, linked via the nullable `Employee.userId` — see
+   * CLAUDE.md's gotcha #6), so the fallback chain here mirrors that: the
+   * linked Employee's name if one exists, else the User's email (still a
+   * real, meaningful identifier — never the bare ID), else a generic
+   * phrase only if the approver record is somehow gone entirely.
+   */
+  private async resolveDisplayName(userId: string | undefined): Promise<string> {
+    if (!userId) return 'a manager';
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { employee: true },
+    });
+    if (!user) return 'a manager';
+
+    return user.employee?.fullName ?? user.email;
   }
 
   private async handleExpenseRejected(event: DomainEvent): Promise<void> {

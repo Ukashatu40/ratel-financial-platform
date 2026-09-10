@@ -15,7 +15,22 @@ import {
   NotificationTemplateType,
   renderTemplate,
 } from '../../notifications/templates/notification-templates';
+import {
+  RATEL_LOGO_BASE64,
+  RATEL_LOGO_CID,
+  RATEL_LOGO_FILENAME,
+  RATEL_LOGO_MIME_TYPE,
+} from '../../notifications/assets/ratel-logo';
 import { NOTIFICATION_QUEUE } from '../queues/notification.queue';
+
+// Decoded once at module load, not per-email — every notification template
+// embeds the same logo via this one CID attachment (see email-layout.ts).
+const LOGO_ATTACHMENT = {
+  filename: RATEL_LOGO_FILENAME,
+  content: Buffer.from(RATEL_LOGO_BASE64, 'base64'),
+  contentType: RATEL_LOGO_MIME_TYPE,
+  cid: RATEL_LOGO_CID,
+};
 
 interface NotificationJobPayload {
   recipientUserId: string;
@@ -68,6 +83,7 @@ export class NotificationProcessor extends WorkerHost {
         to: user.email,
         subject: getSubjectFor(templateType),
         html: renderTemplate(templateType, templateData),
+        attachments: [LOGO_ATTACHMENT],
       });
       await this.prisma.notificationLog.update({
         where: { id: log.id },

@@ -2095,14 +2095,107 @@ notification), resolved via the new `Employee.userId` link from item #41.
 Employees with no linked `User` account are correctly skipped (logged at
 debug, not an error) rather than causing a failure.
 
-### 32. Only 3 notification templates exist, not the full original catalog
+### 32. ~~Only 3 notification templates exist, not the full original catalog~~ — RESOLVED
 **Where:** `src/notifications/templates/notification-templates.ts`
-**What:** Covers `ExpenseApproved`, `ExpenseRejected`, `PayrollRunApproved`
-— the highest-value requester-facing moments. Financial-period close
-reminders, import-job completion notices, and other events from the
-original brief have no template or subscriber registration yet.
-**To close:** Additive — each new template + subscriber registration is
-independent of the others, no architectural change needed to add more.
+**What it was:** Covered `ExpenseApproved`, `ExpenseRejected`,
+`PayrollRunApproved` only — the highest-value requester-facing moments.
+Financial-period close/reopen and payroll-run rejection had no template or
+subscriber registration.
+**Resolved (in an earlier pass than #66 below, which redesigned all 7's
+HTML but didn't add any new ones):** `PayslipReady`, `PayrollRunRejected`,
+`PeriodClosed`, `PeriodReopened` all exist with full subscriber
+registrations in `notification.subscriber.ts`. Total: 7. This heading
+itself was left un-struck-through after that work landed — corrected here
+while #66 was already touching this exact file, rather than leaving a
+stale "still open" entry sitting next to code whose own comments already
+said otherwise.
+**Still true, not part of this entry:** import-job completion notices and
+any other non-financial event from the original brief still have no
+template — genuinely additive if wanted later, same reasoning as before.
+
+### 66. ~~Notification emails were unbranded/generic, and one interpolated a raw user ID into prose~~ — RESOLVED
+**What it was:** Two separate problems, found together while asked to fix
+the visible symptom. (1) `ExpenseApproved`'s email read "...was approved
+by 69cc7531-9067-4bae-872e-5998b8ef430f." — `handleExpenseApproved()` in
+`notification.subscriber.ts` passed `event.payload['approverId']` (the raw
+UUID) straight through as `approverName`, never resolving it to anything
+human-readable. (2) All 7 templates (`notification-templates.ts`) were
+bare `<h2>`/`<p>` fragments with no branding, layout, or visual hierarchy
+— functionally correct, not remotely production-grade for a financial
+platform's customer-facing email.
+
+**Fix 1 — approver name resolution.** New `resolveDisplayName()` in
+`notification.subscriber.ts`: looks up the `User` by ID with its `employee`
+relation included, and returns (in order) the linked `Employee.fullName`,
+else the `User.email`, else `'a manager'` if the record is gone entirely
+or no ID was ever recorded. Mirrors the same `Employee`/`User` fallback
+reasoning CLAUDE.md's gotcha #6 already documents (a `User` has no name
+field of its own — `fullName` only exists on the nullable-linked
+`Employee`). 5 new unit tests cover all four branches plus the
+"expense no longer exists" early-return.
+
+**Fix 2 — a shared, professional HTML email layout.** New
+`src/notifications/templates/email-layout.ts`: one `wrapEmailLayout()`
+shell (logo header, tone-colored accent bar + circular icon badge,
+heading, body slot, branded footer, hidden preheader text for inbox
+previews) plus two reusable content-block builders, `detailsCard()`
+(labeled key/value rows — replaces the old "buried in a sentence" style
+that let the raw UUID slip through unnoticed in the first place) and
+`calloutBox()` (tinted, left-bordered box for a reason/explanation).
+Deliberately table-based layout with inline styles throughout, not
+`<style>` classes or flexbox/grid — the actual, still-current constraint
+for HTML email: Outlook desktop's Word rendering engine and a long tail of
+other clients strip `<style>` blocks and ignore modern CSS layout, but
+every client renders tables + inline styles consistently. All 7 templates
+in `notification-templates.ts` were rewritten onto this shell, each with a
+tone (success/danger/info), a plain typographic badge glyph (✓ / ✕ / i —
+deliberately not emoji, whose glyph coverage and rendering vary widely by
+client/OS), and a details card instead of a run-on sentence. Brand colors
+(navy `#00266B`, green `#00913A`, red `#E30016`) were sampled directly
+from `ratel-logo.jpeg` (repo root), not guessed.
+
+**Logo delivery — CID attachment, not a data: URI or hosted URL.** This
+app has no public HTTPS domain yet (#65 — no domain configured), so a
+hosted-URL logo isn't available, and data: URIs are a known weak point in
+older Outlook desktop. The logo is embedded once as a base64 constant in
+new `src/notifications/assets/ratel-logo.ts` — deliberately NOT read from
+disk via `nest-cli.json`'s asset-copy feature or a raw `readFileSync`
+path, both of which would need to survive this build's already-documented
+`dist/src/...` rootDir quirk (#45) and the production Dockerfile's
+deliberately short COPY list unchanged; a plain `.ts` module compiles
+through the exact same pipeline as every other source file in every
+environment with nothing extra to wire up. `EmailMessage` (the
+`EmailProvider` port) gained an optional `attachments` field
+(`{filename, content, contentType, cid}`); `SmtpEmailProvider` passes it
+straight to nodemailer's own `attachments` option (already CID-aware, no
+new dependency); `NotificationProcessor` decodes the base64 constant into
+a `Buffer` once at module load (not per-email) and attaches it to every
+notification send.
+
+**Verification — sent all 7 templates through the real dev SMTP stack
+(Mailpit), not just rendered to a string.** A throwaway script (deleted
+after use) called the real `renderTemplate()`/nodemailer path end-to-end
+against `docker/docker-compose.yml`'s Mailpit. Screenshotted all 7 via
+headless Chrome against Mailpit's own message viewer: logo renders
+correctly via the CID reference in every one, tone colors/badges/details
+cards render as designed, footer/branding consistent across all 7.
+Separately verified mobile-width responsiveness (375px viewport) via
+Playwright against the raw HTML: `document.documentElement.scrollWidth`
+measured exactly 375 with zero horizontal overflow — no clipping, the
+details card and text wrap correctly. (A first attempt at this check used
+raw `chrome --headless --screenshot` CLI flags and showed a wrong,
+misleading "content clipped past the right edge" result; that turned out
+to be a known quirk of that specific headless invocation, not a real bug
+— re-verified and confirmed correct via Playwright's properly-emulated
+viewport before trusting the result either way.) New
+`test/unit/notifications/notification-templates.spec.ts` (20 tests)
+covers all 7 templates rendering, correct subjects, and — the specific
+regression this bug represents — that a hostile `approverName` or
+`reason` value is HTML-escaped, not injected raw (Handlebars' default
+`{{var}}` escaping, deliberately never `{{{var}}}`, for any real
+user/business data landing in the HTML). Full regression after all
+changes: build clean, lint clean, 462/462 unit tests, 139/139 e2e tests
+(Testcontainers — Postgres/Redis/MinIO/ClamAV), all green.
 
 ### 33. ~~No delivery-tracking API — `NotificationLog` exists but nothing reads it~~ — RESOLVED
 `GET /notifications` (filterable by status) and `GET /notifications/:id`
