@@ -1,0 +1,37 @@
+# ops/caddy/Caddyfile
+#
+# No domain yet (confirmed deployment decision) — bound to plain `:80`,
+# which is also what keeps Caddy's automatic HTTPS off: it only attempts
+# ACME/Let's Encrypt provisioning for addresses that look like a real
+# domain name, never for a bare port. Once a domain is pointed at this
+# VPS, the ENTIRE change needed is replacing the line below with that
+# domain, e.g.:
+#
+#   api.ratel-plus.com {
+#
+# Caddy then provisions and renews the TLS certificate itself, on its own,
+# with no other config change and no code change — this is the whole
+# reason Caddy was chosen as the reverse proxy over nginx/others.
+:80 {
+	reverse_proxy app:3000
+
+	encode gzip
+
+	header {
+		# The app already sets its own security headers via Helmet
+		# (src/main.ts) on every response — nothing duplicated here
+		# beyond what a reverse proxy is actually responsible for.
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+
+	# Uncomment if docker-compose.monitoring.yml is running, to reach
+	# Grafana at /grafana/ instead of publishing another port:
+	# handle_path /grafana/* {
+	# 	reverse_proxy grafana:3000
+	# }
+}
