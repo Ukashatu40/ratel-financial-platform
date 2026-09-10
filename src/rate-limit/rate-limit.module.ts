@@ -44,6 +44,7 @@ const logger = new Logger('RateLimitRedis');
         const storage = new ThrottlerStorageRedisService({
           host: config.get('REDIS_HOST', { infer: true }),
           port: config.get('REDIS_PORT', { infer: true }),
+          password: config.get('REDIS_PASSWORD', { infer: true }),
         });
         // Same lesson as RedisHealthIndicator / TECH_DEBT #19 — an
         // unhandled 'error' event on an ioredis client crashes the whole

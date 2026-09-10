@@ -21,6 +21,7 @@ export class RedisHealthIndicator {
       this.client = new Redis({
         host: this.config.get('REDIS_HOST', { infer: true }),
         port: this.config.get('REDIS_PORT', { infer: true }),
+        password: this.config.get('REDIS_PASSWORD', { infer: true }),
         lazyConnect: true,
         maxRetriesPerRequest: 1, // health checks should fail fast, not hang
       });

@@ -26,6 +26,7 @@ import { BullMqEventDeliveryRetryScheduler } from './adapters/bullmq-event-deliv
         connection: {
           host: config.get('REDIS_HOST', { infer: true }),
           port: config.get('REDIS_PORT', { infer: true }),
+          password: config.get('REDIS_PASSWORD', { infer: true }),
         },
       }),
     }),

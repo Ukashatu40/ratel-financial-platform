@@ -13,10 +13,24 @@ export class SmtpEmailProvider implements EmailProvider {
 
   private getTransporter(): Transporter {
     if (!this.transporter) {
+      const user = this.config.get('SMTP_USER', { infer: true });
+      const pass = this.config.get('SMTP_PASSWORD', { infer: true });
+
       this.transporter = nodemailer.createTransport({
         host: this.config.get('SMTP_HOST', { infer: true }),
         port: this.config.get('SMTP_PORT', { infer: true }),
-        secure: false, // Mailpit (and most local dev SMTP catchers) don't use TLS
+        // false works for BOTH the common transactional-provider case
+        // (port 587, STARTTLS — nodemailer upgrades automatically when the
+        // server advertises it) and local Mailpit (no TLS support at all).
+        // SMTP_SECURE exists as an explicit override for a provider that
+        // specifically wants port 465 (implicit TLS).
+        secure: this.config.get('SMTP_SECURE', { infer: true }) ?? false,
+        // Mailpit and other no-auth local catchers don't accept an `auth`
+        // block at all — some reject the connection outright if one is
+        // sent. Every real transactional provider requires it. Omitting
+        // the key entirely (not passing `auth: undefined`) when either
+        // credential is unset keeps local dev working exactly as before.
+        ...(user && pass ? { auth: { user, pass } } : {}),
       });
     }
     return this.transporter;

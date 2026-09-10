@@ -12,6 +12,11 @@ export const envSchema = z.object({
 
   REDIS_HOST: z.string().min(1),
   REDIS_PORT: z.coerce.number().int().positive(),
+  // Optional — dev/e2e Redis (docker/docker-compose.yml) has no
+  // `requirepass` set. Production's compose file does; every one of the
+  // four places this app constructs a Redis connection (BullMQ, the rate
+  // limiter, idempotency, the health check) reads this the same way.
+  REDIS_PASSWORD: z.string().optional(),
 
   JWT_ACCESS_SECRET: z.string().min(32, 'JWT_ACCESS_SECRET must be at least 32 chars'),
   JWT_REFRESH_SECRET: z.string().min(32, 'JWT_REFRESH_SECRET must be at least 32 chars'),
@@ -50,6 +55,21 @@ export const envSchema = z.object({
   SMTP_HOST: z.string().default('localhost'),
   SMTP_PORT: z.coerce.number().int().positive().default(1025),
   SMTP_FROM: z.string().default('noreply@ratel-plus.com'),
+  // Both optional — Mailpit and other local dev SMTP catchers take no
+  // auth at all. A real transactional provider needs both; unset in
+  // production would mean every notification email silently fails at
+  // send time (logged, not thrown — see NotificationProcessor's retry
+  // handling), not a boot-time failure, so double-check these are set
+  // before relying on production email.
+  SMTP_USER: z.string().optional(),
+  SMTP_PASSWORD: z.string().optional(),
+  // Same z.coerce.boolean() gotcha already fixed once for CORS_CREDENTIALS
+  // — Boolean('false') is true — so the identical explicit-enum parse here
+  // instead of repeating that mistake a second time in this same file.
+  SMTP_SECURE: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
 
   // Phase 9.6 — per-IP token-bucket rate limiting (rate-limit.module.ts).
   // Stricter defaults on auth (credential-stuffing) and reports/export

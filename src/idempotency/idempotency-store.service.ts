@@ -28,6 +28,7 @@ export class IdempotencyStoreService implements OnModuleDestroy {
     this.redis = new Redis({
       host: config.get('REDIS_HOST', { infer: true }),
       port: config.get('REDIS_PORT', { infer: true }),
+      password: config.get('REDIS_PASSWORD', { infer: true }),
     });
     this.redis.on('error', (err) => {
       this.logger.warn(`Idempotency Redis connection error: ${err.message}`);
